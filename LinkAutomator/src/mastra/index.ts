@@ -154,3 +154,15 @@ if (Object.keys(mastra.getAgents()).length > 1) {
     "More than 1 agents found. Currently, more than 1 agents are not supported in the UI, since doing so will cause app state to be inconsistent.",
   );
 }
+// --- Mantenha este código no final do arquivo para o Render não desligar o bot ---
+import { createServer } from 'http';
+
+const port = process.env.PORT || 3000;
+
+createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('LinkAutomator Bot is running!');
+}).listen(port, () => {
+  console.log(`Render Health Check: Server listening on port ${port}`);
+});
+
