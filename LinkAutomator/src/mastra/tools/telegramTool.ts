@@ -55,46 +55,59 @@ export const telegramTool = createTool({
           }).format(context.originalPrice)
         : null;
 
-      let message = `🔥 *OFERTA IMPERDÍVEL!*\n\n`;
-      message += `📦 *${escapeMarkdown(context.productName)}*\n\n`;
+      let caption = `🔥 *OFERTA IMPERDÍVEL!*\n\n`;
+      caption += `📦 *${escapeMarkdown(context.productName)}*\n\n`;
 
       if (context.store) {
-        message += `🏪 Loja: ${escapeMarkdown(context.store)}\n`;
+        caption += `🏪 Loja: ${escapeMarkdown(context.store)}\n`;
       }
 
       if (context.originalPrice && context.originalPrice > context.price) {
-        message += `💰 De: ~${originalPriceFormatted}~\n`;
-        message += `🏷️ *Por: ${priceFormatted}*\n`;
+        caption += `💰 De: ~${originalPriceFormatted}~\n`;
+        caption += `🏷️ *Por: ${priceFormatted}*\n`;
         if (context.discount && context.discount > 0) {
-          message += `📉 Desconto: *${context.discount}% OFF*\n`;
+          caption += `📉 Desconto: *${context.discount}% OFF*\n`;
         }
       } else {
-        message += `💰 *Preço: ${priceFormatted}*\n`;
+        caption += `💰 *Preço: ${priceFormatted}*\n`;
       }
 
-      message += `\n🛒 [COMPRAR AGORA](${context.link})\n`;
-      message += `\n⚡ _Corre que é por tempo limitado!_`;
+      caption += `\n🛒 [COMPRAR AGORA](${context.link})\n`;
+      caption += `\n⚡ _Corre que é por tempo limitado!_`;
 
       logger?.info("📤 [TelegramTool] Sending message to Telegram", {
         channelId,
-        messageLength: message.length,
+        hasImage: !!context.image
       });
 
+      // Se tiver imagem, usa sendPhoto. Se não, usa sendMessage.
+      const method = context.image ? "sendPhoto" : "sendMessage";
+      
+      const body: any = {
+        chat_id: channelId,
+        parse_mode: "MarkdownV2",
+        disable_web_page_preview: false,
+      };
+
+      if (context.image) {
+          body.photo = context.image;
+          body.caption = caption;
+      } else {
+          body.text = caption;
+      }
+
       const response = await fetch(
-        `https://api.telegram.org/bot${botToken}/sendMessage`,
+        `https://api.telegram.org/bot${botToken}/${method}`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            chat_id: channelId,
-            text: message,
-            parse_mode: "Markdown",
-            disable_web_page_preview: false,
-          }),
+          body: JSON.stringify(body),
         }
       );
+      
+      // ... o resto do código continua igual (verificação de erro e retorno)
 
       const data = await response.json();
 
