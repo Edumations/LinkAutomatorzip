@@ -7,7 +7,7 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
-/ 👇 --- COLE ESTE BLOCO LOGO ABAIXO DO 'const pool' --- 👇
+// 👇 --- COLE ESTE BLOCO LOGO ABAIXO DO 'const pool' --- 👇
 async function setupDatabase() {
   // Só roda se tiver URL do banco configurada
   if (!process.env.DATABASE_URL) return;
