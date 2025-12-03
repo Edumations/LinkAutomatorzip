@@ -1,0 +1,148 @@
+# Overview
+
+This is a Mastra-based automation system built for Replit that publishes promotional content to multiple platforms: Telegram, Twitter/X, and WhatsApp. The system uses a time-based trigger (cron) to fetch product deals from Lomadee API and distribute them through all configured channels.
+
+The application is built on Mastra framework, which provides workflows and tools with durable execution via Inngest. The core automation fetches promotional products, tracks previously posted items to avoid duplicates, and publishes to all configured platforms simultaneously.
+
+# User Preferences
+
+Preferred communication style: Simple, everyday language.
+
+# System Architecture
+
+## Framework & Orchestration
+
+**Mastra Framework (v0.20.0)**: Core framework providing workflows and tools with TypeScript-first development. Mastra handles the orchestration of multi-step processes with type-safe schemas.
+
+**Inngest Integration**: Provides durable workflow execution with step-by-step orchestration. This ensures workflows can be paused, resumed, and retried without losing state. Inngest runs as a separate dev server (port 3000) alongside the Mastra server (port 5000) in development.
+
+**Workflow Execution Model**: 
+- Time-based triggers use cron expressions to schedule workflow execution
+- Workflows consist of steps defined with `createStep` and composed with `createWorkflow`
+- Steps have explicit input/output schemas (Zod) for type safety
+
+## Data Persistence
+
+**PostgreSQL**: Primary storage solution using the `@mastra/pg` package. Configured via `DATABASE_URL` environment variable. The `sharedPostgresStorage` instance is used for workflow state and product tracking.
+
+**Product Tracking System**: Database table `posted_products` tracks which products have been posted to avoid duplicates. Each product is stored with its Lomadee ID, name, link, price, posting timestamp, and platform-specific flags (posted_telegram, posted_twitter, posted_whatsapp).
+
+**Workflow State Management**: Inngest and Mastra collaborate to persist workflow snapshots, allowing suspend/resume functionality and retry mechanisms without data loss.
+
+## Logging & Observability
+
+**Pino Logger**: Production-grade structured logging with custom `ProductionPinoLogger` class extending `MastraLogger`. Configured with log levels, formatted output, and error handling for both development and production environments.
+
+**Inngest Dashboard**: Real-time monitoring of workflow execution at http://localhost:3000 in development. Provides step-by-step visibility into workflow runs, retries, and failures.
+
+## Trigger System
+
+**Time-Based Cron Trigger**: Uses `registerCronTrigger` to schedule the promo publisher workflow. The schedule is configurable via `SCHEDULE_CRON_EXPRESSION` environment variable (defaults to hourly: "0 * * * *").
+
+**Trigger Registration Pattern**: Cron triggers are registered BEFORE Mastra initialization in `src/mastra/index.ts`.
+
+**Event Flow**: Inngest evaluates cron expression -> fires event -> triggers workflow -> workflow executes step-by-step with Inngest orchestration.
+
+## Workflow Architecture
+
+**Main Workflow**: `promoPublisherWorkflow` orchestrates the entire promotional publishing process:
+1. Fetch products from Lomadee API (up to 20 products)
+2. Check for previously posted products to avoid duplicates  
+3. Publish up to 5 new products to all platforms (Telegram, Twitter, WhatsApp) with 2-second delay between posts
+
+**Step Composition**: Workflow uses sequential `.then()` chaining for ordered execution. Each step has explicit input/output schemas validated by Zod.
+
+**Rate Limiting**: Maximum 5 products per run to prevent spam and respect API limits.
+
+**Multi-Platform Publishing**: Products are published simultaneously to all configured platforms using Promise.all for efficiency.
+
+# External Dependencies
+
+## Third-Party APIs
+
+**Lomadee API**: Product affiliate API accessed via workflow step. Provides promotional product data including prices, descriptions, and affiliate links. Requires `LOMADEE_API_KEY` environment variable.
+
+**Telegram Bot API**: Messaging platform integration via direct API calls. Requires:
+- `TELEGRAM_BOT_TOKEN`: Bot authentication token
+- `TELEGRAM_CHANNEL_ID`: Target channel for posts
+
+**Twitter/X API v2**: Social media posting via OAuth 1.0a authentication. Requires:
+- `TWITTER_API_KEY`: Twitter API consumer key
+- `TWITTER_API_SECRET`: Twitter API consumer secret
+- `TWITTER_ACCESS_TOKEN`: User access token
+- `TWITTER_ACCESS_TOKEN_SECRET`: User access token secret
+
+**WhatsApp Business API (Meta Cloud API)**: Messaging via Meta's Graph API. Requires:
+- `WHATSAPP_ACCESS_TOKEN`: Meta access token
+- `WHATSAPP_PHONE_NUMBER_ID`: WhatsApp Business phone number ID
+- `WHATSAPP_RECIPIENT_NUMBER`: Target phone number for messages
+- `WHATSAPP_GROUP_ID`: (Optional) Group ID for broadcast messages
+
+## Infrastructure Services
+
+**Inngest Cloud/Dev Server**: Workflow orchestration platform running separately from Mastra server. In development, runs on localhost:3000. In production, connects to Inngest Cloud for durable execution.
+
+**PostgreSQL Database**: Primary data store for workflow state and product tracking. Connection via `DATABASE_URL` environment variable.
+
+## Development Tools
+
+**TypeScript & TSX**: Type-safe development with `tsx` for running TypeScript files directly during development. ES2022 module system with bundler resolution.
+
+**Prettier**: Code formatting configured with check and format scripts.
+
+**Mastra CLI**: Development tooling via `mastra dev`, `mastra build` commands. Manages the build process and development server.
+
+## Supporting Libraries
+
+**Zod**: Schema validation for workflow inputs/outputs, tool parameters, and agent configurations.
+
+**dotenv**: Environment variable management for configuration.
+
+# Key Files
+
+- `src/mastra/workflows/promoPublisherWorkflow.ts`: Main workflow with 3 steps (fetch, filter, publish to all platforms)
+- `src/mastra/tools/telegramTool.ts`: Telegram messaging tool
+- `src/mastra/tools/twitterTool.ts`: Twitter/X posting tool with OAuth 1.0a
+- `src/mastra/tools/whatsappTool.ts`: WhatsApp Business API messaging tools
+- `src/mastra/agents/promoPublisherAgent.ts`: AI agent with all platform tools
+- `src/mastra/index.ts`: Mastra configuration and cron trigger registration
+- `src/triggers/cronTriggers.ts`: Cron trigger registration logic
+- `tests/testCronAutomation.ts`: Manual trigger test script
+
+# Environment Variables Required
+
+## Required for Core Functionality
+- `DATABASE_URL`: PostgreSQL connection string
+- `LOMADEE_API_KEY`: Lomadee affiliate API key
+
+## Telegram (Optional)
+- `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
+- `TELEGRAM_CHANNEL_ID`: Channel ID (e.g., @mychannel or -1001234567890)
+
+## Twitter/X (Optional)
+- `TWITTER_API_KEY`: API key from Twitter Developer Portal
+- `TWITTER_API_SECRET`: API secret
+- `TWITTER_ACCESS_TOKEN`: User access token
+- `TWITTER_ACCESS_TOKEN_SECRET`: User access token secret
+
+## WhatsApp Business (Optional)
+- `WHATSAPP_ACCESS_TOKEN`: Meta Graph API access token
+- `WHATSAPP_PHONE_NUMBER_ID`: WhatsApp Business phone number ID
+- `WHATSAPP_RECIPIENT_NUMBER`: Target phone number (with country code)
+- `WHATSAPP_GROUP_ID`: (Optional) Group ID for broadcasts
+
+# Database Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS posted_products (
+  id SERIAL PRIMARY KEY,
+  lomadee_product_id VARCHAR(255) UNIQUE NOT NULL,
+  product_name TEXT,
+  product_link TEXT,
+  product_price DECIMAL(10, 2),
+  posted_telegram BOOLEAN DEFAULT FALSE,
+  posted_twitter BOOLEAN DEFAULT FALSE,
+  posted_whatsapp BOOLEAN DEFAULT FALSE,
+  posted_at TIMESTAMP DEFAULT NOW()
+);
+```
