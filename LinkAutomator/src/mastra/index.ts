@@ -27,6 +27,16 @@ registerCronTrigger({
   workflow: promoPublisherWorkflow,
 });
 
+// --- ADICIONE ISTO AQUI (Lugar 1) ---
+console.log("=== DIAGNÓSTICO DE INICIALIZAÇÃO ===");
+console.log("O Bot está rodando!");
+console.log("Chat ID configurado:", process.env.TELEGRAM_CHAT_ID);
+// Mostra apenas os 5 primeiros digitos do token para segurança
+console.log("Token parcial:", process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.substring(0, 5) + "..." : "NÃO ENCONTRADO");
+console.log("====================================");
+
+// Resto do seu código...
+
 class ProductionPinoLogger extends MastraLogger {
   protected logger: pino.Logger;
 
