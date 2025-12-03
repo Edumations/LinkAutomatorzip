@@ -1,8 +1,8 @@
 # Overview
 
-This is a Mastra-based automation system built for Replit that publishes promotional content to multiple platforms: Telegram, Twitter/X, and WhatsApp. The system uses a time-based trigger (cron) to fetch product deals from Lomadee API and distribute them through all configured channels.
+This is a Mastra-based automation system built for Replit that publishes promotional content to Telegram. The system uses a time-based trigger (cron) to fetch product deals from Lomadee API and distribute them through Telegram channel.
 
-The application is built on Mastra framework, which provides workflows and tools with durable execution via Inngest. The core automation fetches promotional products, tracks previously posted items to avoid duplicates, and publishes to all configured platforms simultaneously.
+The application is built on Mastra framework, which provides workflows and tools with durable execution via Inngest. The core automation fetches promotional products, tracks previously posted items to avoid duplicates, and publishes to Telegram.
 
 # User Preferences
 
@@ -25,7 +25,7 @@ Preferred communication style: Simple, everyday language.
 
 **PostgreSQL**: Primary storage solution using the `@mastra/pg` package. Configured via `DATABASE_URL` environment variable. The `sharedPostgresStorage` instance is used for workflow state and product tracking.
 
-**Product Tracking System**: Database table `posted_products` tracks which products have been posted to avoid duplicates. Each product is stored with its Lomadee ID, name, link, price, posting timestamp, and platform-specific flags (posted_telegram, posted_twitter, posted_whatsapp).
+**Product Tracking System**: Database table `posted_products` tracks which products have been posted to avoid duplicates. Each product is stored with its Lomadee ID, name, link, price, and posting timestamp.
 
 **Workflow State Management**: Inngest and Mastra collaborate to persist workflow snapshots, allowing suspend/resume functionality and retry mechanisms without data loss.
 
@@ -41,20 +41,18 @@ Preferred communication style: Simple, everyday language.
 
 **Trigger Registration Pattern**: Cron triggers are registered BEFORE Mastra initialization in `src/mastra/index.ts`.
 
-**Event Flow**: Inngest evaluates cron expression -> fires event -> triggers workflow -> workflow executes step-by-step with Inngest orchestration.
+**Event Flow**: Inngest evaluates cron expression → fires event → triggers workflow → workflow executes step-by-step with Inngest orchestration.
 
 ## Workflow Architecture
 
 **Main Workflow**: `promoPublisherWorkflow` orchestrates the entire promotional publishing process:
 1. Fetch products from Lomadee API (up to 20 products)
 2. Check for previously posted products to avoid duplicates  
-3. Publish up to 5 new products to all platforms (Telegram, Twitter, WhatsApp) with 2-second delay between posts
+3. Publish up to 5 new products to Telegram with 2-second delay between posts
 
 **Step Composition**: Workflow uses sequential `.then()` chaining for ordered execution. Each step has explicit input/output schemas validated by Zod.
 
 **Rate Limiting**: Maximum 5 products per run to prevent spam and respect API limits.
-
-**Multi-Platform Publishing**: Products are published simultaneously to all configured platforms using Promise.all for efficiency.
 
 # External Dependencies
 
@@ -65,18 +63,6 @@ Preferred communication style: Simple, everyday language.
 **Telegram Bot API**: Messaging platform integration via direct API calls. Requires:
 - `TELEGRAM_BOT_TOKEN`: Bot authentication token
 - `TELEGRAM_CHANNEL_ID`: Target channel for posts
-
-**Twitter/X API v2**: Social media posting via OAuth 1.0a authentication. Requires:
-- `TWITTER_API_KEY`: Twitter API consumer key
-- `TWITTER_API_SECRET`: Twitter API consumer secret
-- `TWITTER_ACCESS_TOKEN`: User access token
-- `TWITTER_ACCESS_TOKEN_SECRET`: User access token secret
-
-**WhatsApp Business API (Meta Cloud API)**: Messaging via Meta's Graph API. Requires:
-- `WHATSAPP_ACCESS_TOKEN`: Meta access token
-- `WHATSAPP_PHONE_NUMBER_ID`: WhatsApp Business phone number ID
-- `WHATSAPP_RECIPIENT_NUMBER`: Target phone number for messages
-- `WHATSAPP_GROUP_ID`: (Optional) Group ID for broadcast messages
 
 ## Infrastructure Services
 
@@ -100,49 +86,7 @@ Preferred communication style: Simple, everyday language.
 
 # Key Files
 
-- `src/mastra/workflows/promoPublisherWorkflow.ts`: Main workflow with 3 steps (fetch, filter, publish to all platforms)
-- `src/mastra/tools/telegramTool.ts`: Telegram messaging tool
-- `src/mastra/tools/twitterTool.ts`: Twitter/X posting tool with OAuth 1.0a
-- `src/mastra/tools/whatsappTool.ts`: WhatsApp Business API messaging tools
-- `src/mastra/agents/promoPublisherAgent.ts`: AI agent with all platform tools
+- `src/mastra/workflows/promoPublisherWorkflow.ts`: Main workflow with 3 steps (fetch, filter, publish)
 - `src/mastra/index.ts`: Mastra configuration and cron trigger registration
 - `src/triggers/cronTriggers.ts`: Cron trigger registration logic
 - `tests/testCronAutomation.ts`: Manual trigger test script
-
-# Environment Variables Required
-
-## Required for Core Functionality
-- `DATABASE_URL`: PostgreSQL connection string
-- `LOMADEE_API_KEY`: Lomadee affiliate API key
-
-## Telegram (Optional)
-- `TELEGRAM_BOT_TOKEN`: Bot token from @BotFather
-- `TELEGRAM_CHANNEL_ID`: Channel ID (e.g., @mychannel or -1001234567890)
-
-## Twitter/X (Optional)
-- `TWITTER_API_KEY`: API key from Twitter Developer Portal
-- `TWITTER_API_SECRET`: API secret
-- `TWITTER_ACCESS_TOKEN`: User access token
-- `TWITTER_ACCESS_TOKEN_SECRET`: User access token secret
-
-## WhatsApp Business (Optional)
-- `WHATSAPP_ACCESS_TOKEN`: Meta Graph API access token
-- `WHATSAPP_PHONE_NUMBER_ID`: WhatsApp Business phone number ID
-- `WHATSAPP_RECIPIENT_NUMBER`: Target phone number (with country code)
-- `WHATSAPP_GROUP_ID`: (Optional) Group ID for broadcasts
-
-# Database Schema
-
-```sql
-CREATE TABLE IF NOT EXISTS posted_products (
-  id SERIAL PRIMARY KEY,
-  lomadee_product_id VARCHAR(255) UNIQUE NOT NULL,
-  product_name TEXT,
-  product_link TEXT,
-  product_price DECIMAL(10, 2),
-  posted_telegram BOOLEAN DEFAULT FALSE,
-  posted_twitter BOOLEAN DEFAULT FALSE,
-  posted_whatsapp BOOLEAN DEFAULT FALSE,
-  posted_at TIMESTAMP DEFAULT NOW()
-);
-```
