@@ -178,6 +178,15 @@ const filterNewProductsStep = createStep({
       const newProducts = inputData.products.filter((p) => !postedIds.has(p.id));
       const alreadyPostedCount = inputData.products.length - newProducts.length;
 
+      // --- ADICIONE ESTE BLOCO AQUI ---
+      console.log("========================================");
+      console.log(`🔎 [DIAGNÓSTICO FILTRO] Dos produtos encontrados:`);
+      console.log(`   - Já postados antes: ${alreadyPostedCount}`);
+      console.log(`   - Novos para postar agora: ${newProducts.length}`);
+      console.log("========================================");
+      // --------------------------------
+
+
       logger?.info("✅ [Step 2] Filtering complete", {
         newCount: newProducts.length,
         alreadyPostedCount,
