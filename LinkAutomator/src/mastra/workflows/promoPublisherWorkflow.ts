@@ -98,7 +98,17 @@ const fetchProductsStep = createStep({
         store: item.store || item.storeName || item.advertiser || "",
         category: item.category || item.categoryName || "",
       }));
-
+// --- ADICIONE ESTE BLOCO AQUI ---
+      console.log("========================================");
+      console.log(`🔎 [DIAGNÓSTICO CAUSA 1] A API retornou: ${products.length} produtos.`);
+      if (products.length > 0) {
+          console.log(`   Exemplo do 1º produto: ${products[0].name} - R$ ${products[0].price}`);
+      } else {
+          console.log("   ⚠️ A lista veio vazia da Lomadee!");
+      }
+      console.log("========================================");
+      // --------------------------------
+      
       logger?.info("✅ [Step 1] Products fetched", { count: products.length });
 
       return {
