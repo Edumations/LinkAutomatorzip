@@ -103,6 +103,12 @@ export const lomadeeTool = createTool({
         store: item.store || item.storeName || item.advertiser || "",
         category: item.category || item.categoryName || "",
       }));
+      // 🔴 COLE O CÓDIGO DE DIAGNÓSTICO AQUI 🔴
+console.log("========================================");
+console.log(`🔎 [DIAGNÓSTICO] A API da Lomadee retornou: ${products.length} produtos.`);
+if (products.length === 0) console.log("⚠️ Lista vazia! Verifique se a categoria tem ofertas hoje.");
+console.log("========================================");
+// 🔴 FIM DO CÓDIGO 🔴
 
       logger?.info("✅ [LomadeeTool] Products fetched successfully", { 
         count: products.length 
