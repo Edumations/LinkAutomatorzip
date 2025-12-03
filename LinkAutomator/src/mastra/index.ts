@@ -23,7 +23,7 @@ import {
 } from "./tools/productTrackerTool";
 
 registerCronTrigger({
-  cronExpression: process.env.SCHEDULE_CRON_EXPRESSION || "0 * * * *",
+  cronExpression: process.env.SCHEDULE_CRON_EXPRESSION || "*/5 * * * *",
   workflow: promoPublisherWorkflow,
 });
 
