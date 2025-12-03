@@ -7,7 +7,33 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
+/ 👇 --- COLE ESTE BLOCO LOGO ABAIXO DO 'const pool' --- 👇
+async function setupDatabase() {
+  // Só roda se tiver URL do banco configurada
+  if (!process.env.DATABASE_URL) return;
+  
+  console.log("🛠️ Verificando banco de dados...");
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS posted_products (
+        id SERIAL PRIMARY KEY,
+        lomadee_product_id VARCHAR(255) UNIQUE NOT NULL,
+        product_name TEXT,
+        product_link TEXT,
+        product_price DECIMAL(10, 2),
+        posted_telegram BOOLEAN DEFAULT FALSE,
+        posted_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log("✅ Tabela 'posted_products' pronta para uso!");
+  } catch (err) {
+    console.error("❌ Erro fatal ao criar tabela:", err);
+  }
+}
 
+// Executa a criação assim que este arquivo for carregado
+setupDatabase();
+// 👆 --------------------------------------------------- 👆
 const ProductSchema = z.object({
   id: z.string(),
   name: z.string(),
