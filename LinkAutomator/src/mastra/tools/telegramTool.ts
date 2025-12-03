@@ -108,7 +108,14 @@ export const telegramTool = createTool({
       );
       
       // ... o resto do código continua igual (verificação de erro e retorno)
+// ... código que busca produtos ...
 
+// --- ADICIONE ISTO AQUI (Lugar 2) ---
+console.log("Tentando enviar mensagem agora...");
+console.log("Existe token neste momento?", process.env.TELEGRAM_BOT_TOKEN ? "Sim" : "Não");
+
+// A linha que envia a mensagem vem logo abaixo (exemplo):
+// await bot.telegram.sendMessage(chatId, texto);
       const data = await response.json();
 
       if (!data.ok) {
