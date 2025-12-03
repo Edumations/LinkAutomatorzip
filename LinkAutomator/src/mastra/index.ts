@@ -1,3 +1,5 @@
+// Adicione isso na primeira linha do seu arquivo principal
+globalThis.__MASTRA_TELEMETRY__ = true;
 import { Mastra } from "@mastra/core";
 import { MastraError } from "@mastra/core/error";
 import { PinoLogger } from "@mastra/loggers";
