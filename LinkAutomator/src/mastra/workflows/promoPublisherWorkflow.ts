@@ -4,7 +4,6 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-// Configuração do Banco de Dados com SSL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
@@ -63,6 +62,7 @@ function safeParseFloat(value: any): number {
 function getStoreFromLink(link: string, fallback: string): string {
   if (!link) return fallback;
   const lower = link.toLowerCase();
+  
   if (lower.includes("amazon")) return "Amazon";
   if (lower.includes("magalu") || lower.includes("magazineluiza")) return "Magalu";
   if (lower.includes("shopee")) return "Shopee";
@@ -71,10 +71,14 @@ function getStoreFromLink(link: string, fallback: string): string {
   if (lower.includes("americanas")) return "Americanas";
   if (lower.includes("girafa")) return "Girafa";
   if (lower.includes("fastshop")) return "Fast Shop";
+  if (lower.includes("ponto")) return "Ponto Frio";
+  if (lower.includes("extra")) return "Extra";
+  if (lower.includes("kabum")) return "KaBuM!";
+  
   return fallback;
 }
 
-// Passo 1: Buscar Produtos (COM DEBUG E CORREÇÃO DE PREÇO)
+// Passo 1: Buscar (AUMENTADO PARA 80 PRODUTOS)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products",
@@ -90,7 +94,8 @@ const fetchProductsStep = createStep({
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
     try {
-      const params = new URLSearchParams({ page: "1", limit: "60", sort: "discount" });
+      // Busca 80 produtos para ter margem para filtrar 20 bons
+      const params = new URLSearchParams({ page: "1", limit: "80", sort: "discount" });
       const response = await fetch(
         `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
         {
@@ -103,17 +108,9 @@ const fetchProductsStep = createStep({
 
       const data = await response.json();
       
-      // --- DEBUG: LOGAR O PRIMEIRO PRODUTO PARA VER OS CAMPOS ---
-      if (data.data && data.data.length > 0) {
-        console.log("🔍 [DEBUG API] Estrutura do produto:", JSON.stringify(data.data[0]));
-      }
-      // ---------------------------------------------------------
-
       const products: Product[] = (data.data || []).map((item: any) => {
         const rawLink = item.link || item.url || "";
         const storeName = item.store?.name || getStoreFromLink(rawLink, "Loja Parceira");
-        
-        // TENTA VÁRIOS CAMPOS DE PREÇO
         const rawPrice = item.price || item.salePrice || item.priceMin || item.priceMax || 0;
         
         return {
@@ -130,16 +127,16 @@ const fetchProductsStep = createStep({
         };
       });
 
-      console.log(`✅ [Passo 1] ${products.length} produtos encontrados.`);
-      return { success: true, products }; // Removemos o filtro price > 0 para não travar
+      const validProducts = products.filter(p => p.price > 0);
+      console.log(`✅ [Passo 1] ${validProducts.length} produtos válidos encontrados.`);
+      return { success: true, products: validProducts };
     } catch (error) {
-      console.error("❌ Erro fetch:", error);
       return { success: false, products: [], error: String(error) };
     }
   },
 });
 
-// Passo 2: Filtrar com Diversidade
+// Passo 2: Filtrar (AUMENTADO LIMITE PARA 20)
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters products",
@@ -154,7 +151,7 @@ const filterNewProductsStep = createStep({
     alreadyPostedCount: z.number(),
   }),
   execute: async ({ inputData }) => {
-    console.log("🚀 [Passo 2] Filtrando...");
+    console.log("🚀 [Passo 2] Filtrando produtos...");
     if (!inputData.success || inputData.products.length === 0) {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
@@ -172,8 +169,9 @@ const filterNewProductsStep = createStep({
       
       const selected: Product[] = [];
       const usedStores = new Set<string>();
-      const MAX = 3;
+      const MAX = 20; // <--- ALTERADO PARA 20
 
+      // Prioridade 1: Lojas inéditas na rodada
       for (const p of available) {
         if (selected.length >= MAX) break;
         const sKey = p.store.toLowerCase();
@@ -183,6 +181,7 @@ const filterNewProductsStep = createStep({
         }
       }
 
+      // Prioridade 2: Preencher com o que sobrou até 20
       if (selected.length < MAX) {
         for (const p of available) {
           if (selected.length >= MAX) break;
@@ -190,7 +189,7 @@ const filterNewProductsStep = createStep({
         }
       }
 
-      console.log(`✅ [Passo 2] Selecionados: ${selected.length}`);
+      console.log(`✅ [Passo 2] Selecionados para postar: ${selected.length}`);
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
     } catch {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
@@ -198,7 +197,7 @@ const filterNewProductsStep = createStep({
   },
 });
 
-// Passo 3: IA (Adaptada para preço zero)
+// Passo 3: IA
 const generateCopyStep = createStep({
   id: "generate-copy",
   description: "AI Copywriting",
@@ -211,7 +210,7 @@ const generateCopyStep = createStep({
     enrichedProducts: z.array(ProductSchema),
   }),
   execute: async ({ inputData, mastra }) => {
-    console.log("🚀 [Passo 3] Criando textos...");
+    console.log(`🚀 [Passo 3] Gerando textos para ${inputData.newProducts.length} itens...`);
     if (!inputData.success || inputData.newProducts.length === 0) {
       return { success: true, enrichedProducts: [] };
     }
@@ -219,13 +218,9 @@ const generateCopyStep = createStep({
     const agent = mastra?.getAgent("promoPublisherAgent");
     const enrichedProducts = [...inputData.newProducts];
 
-    for (let i = 0; i < enrichedProducts.length; i++) {
-      const p = enrichedProducts[i];
-      let priceText = "Confira no site";
-      
-      if (p.price > 0) {
-        priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
-      }
+    // Processa em paralelo para ser mais rápido
+    await Promise.all(enrichedProducts.map(async (p) => {
+      let priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
       
       const prompt = `
         PRODUTO: ${p.name}
@@ -234,9 +229,9 @@ const generateCopyStep = createStep({
         LINK: ${p.link}
         
         Crie uma legenda para Telegram.
-        1. Use emoji de fogo/alerta.
+        1. Use emoji.
         2. Texto curto.
-        3. CITE O PREÇO: ${priceText}
+        3. OBRIGATÓRIO: ${priceText}
         4. Finalize com chamada para o link.
       `;
 
@@ -246,28 +241,23 @@ const generateCopyStep = createStep({
       } catch (error) {
         p.generatedMessage = ""; 
       }
-    }
+    }));
 
     return { success: true, enrichedProducts };
   },
 });
 
-// Envio e Marcação
+// Envio
 async function sendTelegramMessage(product: Product): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHANNEL_ID;
   if (!token || !chat) return false;
 
   try {
-    let priceText = "Confira no site!";
-    if (product.price > 0) {
-        priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
-    }
-
+    let priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
     let text = product.generatedMessage || "";
 
-    // Fallback se a IA falhar
-    if (!text) {
+    if (!text || !text.includes("R$")) {
       text = `🔥 *OFERTA IMPERDÍVEL*\n\n📦 ${product.name}\n\n💰 *${priceText}*\n\n👇 Link Oficial:`;
     }
 
@@ -315,11 +305,14 @@ const publishStep = createStep({
     console.log("🚀 [Passo 4] Publicando...");
     if (!inputData.success) return { success: true, count: 0 };
     let count = 0;
+    
+    // Publica com delay reduzido para não demorar demais com 20 itens
     for (const p of inputData.enrichedProducts) {
       if (await sendTelegramMessage(p)) {
         await markPosted(p.id);
         count++;
-        console.log(`✅ [SUCESSO] Postado: ${p.name}`);
+        console.log(`✅ [${count}/20] Enviado: ${p.name}`);
+        // 2 segundos de delay entre posts
         await new Promise(r => setTimeout(r, 2000));
       }
     }
