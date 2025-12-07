@@ -1,5 +1,6 @@
-// Adicione isso na primeira linha do seu arquivo principal
+// Adicione isso na primeira linha
 globalThis.__MASTRA_TELEMETRY__ = true;
+
 import { Mastra } from "@mastra/core";
 import { MastraError } from "@mastra/core/error";
 import { PinoLogger } from "@mastra/loggers";
@@ -8,14 +9,17 @@ import pino from "pino";
 import { MCPServer } from "@mastra/mcp";
 import { NonRetriableError } from "inngest";
 import { z } from "zod";
+// Importar cron nativo para não depender do Inngest Cloud
+import cron from "node-cron"; 
 
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
 
-import { registerCronTrigger } from "../triggers/cronTriggers";
+// Importar workflows e agentes
 import { promoPublisherAgent } from "./agents/promoPublisherAgent";
 import { promoPublisherWorkflow } from "./workflows/promoPublisherWorkflow";
 
+// Importar ferramentas
 import { lomadeeTool } from "./tools/lomadeeTool";
 import { telegramTool } from "./tools/telegramTool";
 import {
@@ -24,62 +28,30 @@ import {
   getRecentlyPostedProductsTool,
 } from "./tools/productTrackerTool";
 
-registerCronTrigger({
-  cronExpression: process.env.SCHEDULE_CRON_EXPRESSION || "*/5 * * * *",
-  workflow: promoPublisherWorkflow,
-});
+// --- DIAGNÓSTICO INICIAL ---
+console.log("=== INICIANDO MASTRA NO RENDER ===");
+console.log("Chat ID:", process.env.TELEGRAM_CHAT_ID ? "Configurado" : "FALTANDO");
+console.log("Bot Token:", process.env.TELEGRAM_BOT_TOKEN ? "Configurado" : "FALTANDO");
+console.log("Porta do Render:", process.env.PORT || "Não definida (usando 5000)");
 
-// --- ADICIONE ISTO AQUI (Lugar 1) ---
-console.log("=== DIAGNÓSTICO DE INICIALIZAÇÃO ===");
-console.log("O Bot está rodando!");
-console.log("Chat ID configurado:", process.env.TELEGRAM_CHAT_ID);
-// Mostra apenas os 5 primeiros digitos do token para segurança
-console.log("Token parcial:", process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.substring(0, 5) + "..." : "NÃO ENCONTRADO");
-console.log("====================================");
-
-// Resto do seu código...
-
+// Configuração do Logger
 class ProductionPinoLogger extends MastraLogger {
   protected logger: pino.Logger;
-
-  constructor(
-    options: {
-      name?: string;
-      level?: LogLevel;
-    } = {},
-  ) {
+  constructor(options: { name?: string; level?: LogLevel; } = {}) {
     super(options);
-
     this.logger = pino({
       name: options.name || "app",
       level: options.level || LogLevel.INFO,
-      base: {},
-      formatters: {
-        level: (label: string, _number: number) => ({
-          level: label,
-        }),
-      },
       timestamp: () => `,"time":"${new Date(Date.now()).toISOString()}"`,
     });
   }
-
-  debug(message: string, args: Record<string, any> = {}): void {
-    this.logger.debug(args, message);
-  }
-
-  info(message: string, args: Record<string, any> = {}): void {
-    this.logger.info(args, message);
-  }
-
-  warn(message: string, args: Record<string, any> = {}): void {
-    this.logger.warn(args, message);
-  }
-
-  error(message: string, args: Record<string, any> = {}): void {
-    this.logger.error(args, message);
-  }
+  debug(message: string, args: Record<string, any> = {}): void { this.logger.debug(args, message); }
+  info(message: string, args: Record<string, any> = {}): void { this.logger.info(args, message); }
+  warn(message: string, args: Record<string, any> = {}): void { this.logger.warn(args, message); }
+  error(message: string, args: Record<string, any> = {}): void { this.logger.error(args, message); }
 }
 
+// Inicialização do Mastra
 export const mastra = new Mastra({
   storage: sharedPostgresStorage,
   workflows: { promoPublisherWorkflow },
@@ -97,84 +69,57 @@ export const mastra = new Mastra({
       },
     }),
   },
-  bundler: {
-    externals: [
-      "@slack/web-api",
-      "inngest",
-      "inngest/hono",
-      "hono",
-      "hono/streaming",
-    ],
-    sourcemap: true,
-  },
   server: {
     host: "0.0.0.0",
-    port: 5000,
-    middleware: [
-      async (c, next) => {
-        const mastra = c.get("mastra");
-        const logger = mastra?.getLogger();
-        logger?.debug("[Request]", { method: c.req.method, url: c.req.url });
-        try {
-          await next();
-        } catch (error) {
-          logger?.error("[Response]", {
-            method: c.req.method,
-            url: c.req.url,
-            error,
-          });
-          if (error instanceof MastraError) {
-            if (error.id === "AGENT_MEMORY_MISSING_RESOURCE_ID") {
-              throw new NonRetriableError(error.message, { cause: error });
-            }
-          } else if (error instanceof z.ZodError) {
-            throw new NonRetriableError(error.message, { cause: error });
-          }
-
-          throw error;
-        }
-      },
-    ],
+    // CORREÇÃO CRÍTICA 1: Usar a porta que o Render fornece
+    port: parseInt(process.env.PORT || "5000"), 
     apiRoutes: [
       {
         path: "/api/inngest",
         method: "ALL",
         createHandler: async ({ mastra }) => inngestServe({ mastra, inngest }),
       },
+      // Rota simples para o Health Check do Render não falhar
+      {
+        path: "/",
+        method: "GET",
+        handler: async (c) => c.text("Mastra Bot is Running! 🚀"),
+      }
     ],
   },
-  logger:
-    process.env.NODE_ENV === "production"
-      ? new ProductionPinoLogger({
-          name: "Mastra",
-          level: "info",
-        })
-      : new PinoLogger({
-          name: "Mastra",
-          level: "info",
-        }),
+  logger: new ProductionPinoLogger({ name: "Mastra", level: "info" }),
 });
 
-if (Object.keys(mastra.getWorkflows()).length > 1) {
-  throw new Error(
-    "More than 1 workflows found. Currently, more than 1 workflows are not supported in the UI, since doing so will cause app state to be inconsistent.",
-  );
-}
+// CORREÇÃO CRÍTICA 2: Agendador Interno (Substitui o Inngest Cron)
+// Isso garante que o bot rode sozinho sem precisar de gatilhos externos
+const cronExpression = process.env.SCHEDULE_CRON_EXPRESSION || "*/30 * * * *"; // A cada 30 min por padrão
 
-if (Object.keys(mastra.getAgents()).length > 1) {
-  throw new Error(
-    "More than 1 agents found. Currently, more than 1 agents are not supported in the UI, since doing so will cause app state to be inconsistent.",
-  );
-}
-// --- Mantenha este código no final do arquivo para o Render não desligar o bot ---
-import { createServer } from 'http';
+console.log(`⏰ Configurando agendamento interno: ${cronExpression}`);
 
-const port = process.env.PORT || 3000;
-
-createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LinkAutomator Bot is running!');
-}).listen(port, () => {
-  console.log(`Render Health Check: Server listening on port ${port}`);
+// Instale node-cron se não tiver: npm install node-cron @types/node-cron
+cron.schedule(cronExpression, async () => {
+  console.log("🚀 [CRON INTERNO] Disparando workflow de promoções...");
+  try {
+    const workflow = mastra.getWorkflow("promoPublisherWorkflow");
+    if (workflow) {
+      // Inicia o workflow manualmente
+      const run = await workflow.createRunAsync();
+      const result = await run.start({ inputData: {} });
+      console.log("✅ Workflow iniciado com sucesso:", result.runId);
+    } else {
+      console.error("❌ Workflow não encontrado!");
+    }
+  } catch (error) {
+    console.error("❌ Erro ao disparar workflow:", error);
+  }
 });
 
+// Disparo imediato ao iniciar (para você ver funcionando logo no deploy)
+setTimeout(async () => {
+  console.log("⚡ [STARTUP] Executando verificação inicial...");
+  const workflow = mastra.getWorkflow("promoPublisherWorkflow");
+  if (workflow) {
+    const run = await workflow.createRunAsync();
+    run.start({ inputData: {} }).catch(err => console.error("Erro no startup:", err));
+  }
+}, 10000); // Roda 10 segundos após o boot
