@@ -68,10 +68,38 @@ function safeParseFloat(value: any): number {
   return parseFloat(str) || 0;
 }
 
-function getBestPrice(item: any): number {
-  const possibilities = [item.price, item.salePrice, item.priceMin, item.priceMax];
-  const validPrices = possibilities.map(safeParseFloat).filter(p => p > 0);
-  return validPrices.length > 0 ? Math.min(...validPrices) : 0;
+// --- FUNÇÃO DE EXTRAÇÃO PROFUNDA (CORREÇÃO) ---
+function extractDeepData(item: any) {
+  let price = safeParseFloat(item.price || item.salePrice || item.priceMin || item.priceMax);
+  let originalPrice = safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax);
+  let store = item.store?.name || item.storeName || item.advertiser?.name;
+  let image = item.image || item.thumbnail;
+
+  // Se não achou preço ou loja na raiz, mergulha em 'options'
+  if ((price === 0 || !store) && item.options && item.options.length > 0) {
+    // Pega a primeira opção disponível
+    const opt = item.options.find((o: any) => o.available) || item.options[0];
+    
+    // Tenta pegar preço dentro de pricing (estrutura comum da Lomadee)
+    if (opt.pricing && opt.pricing.length > 0) {
+        const p = opt.pricing[0];
+        if (price === 0) price = safeParseFloat(p.price || p.salePrice || p.listPrice);
+    }
+    // Tenta pegar preço direto na option
+    if (price === 0) price = safeParseFloat(opt.price);
+
+    // Tenta pegar loja
+    if (!store) store = opt.seller?.name || opt.seller || "Loja Parceira";
+    
+    // Tenta melhorar a imagem
+    if (opt.images && opt.images.length > 0) {
+        // Pega a primeira imagem válida
+        const imgObj = opt.images[0];
+        image = imgObj.url || imgObj.large || imgObj.medium || image;
+    }
+  }
+
+  return { price, originalPrice, store, image };
 }
 
 function getStoreFromLink(link: string, fallback: string): string {
@@ -92,7 +120,7 @@ function getStoreFromLink(link: string, fallback: string): string {
   return fallback;
 }
 
-// Passo 1: Buscar Produtos (COM DEBUG PROFUNDO)
+// Passo 1: Buscar Produtos
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products sequentially",
@@ -104,7 +132,7 @@ const fetchProductsStep = createStep({
   }),
   execute: async ({ mastra }) => {
     const apiKey = process.env.LOMADEE_API_KEY;
-    const sourceId = process.env.LOMADEE_SOURCE_ID; // AGORA USADO SE DISPONÍVEL
+    const sourceId = process.env.LOMADEE_SOURCE_ID;
     
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
@@ -123,18 +151,13 @@ const fetchProductsStep = createStep({
         }
         
         const data = await res.json();
-        
-        if (!data.data || data.data.length === 0) {
-            return [];
-        }
-        
-        return data.data;
+        return data.data || [];
       } catch (e) { 
+        console.error(e);
         return []; 
       }
     };
 
-    // Sorteia 10 categorias (Reduzido para teste de estabilidade)
     const shuffled = [...KEYWORDS].sort(() => 0.5 - Math.random());
     const targets = shuffled.slice(0, 10);
     console.log(`🚀 [Passo 1] Buscando: ${targets.join(", ")}`);
@@ -143,66 +166,68 @@ const fetchProductsStep = createStep({
 
     // Busca Sequencial
     for (const keyword of targets) {
-      // Pega 2 produtos por categoria para garantir pelo menos 1 bom
       const rawItems = await fetchAPI(
-          new URLSearchParams({ keyword, sort: "discount", limit: "2" }), 
+          new URLSearchParams({ keyword, sort: "discount", limit: "3" }), 
           `Cat: ${keyword}`
       );
       
       const parsedItems = rawItems.map((item: any) => {
-        const price = getBestPrice(item);
-        
-        // DEBUG: Se o preço for 0, mostra o que veio da API
-        if (price === 0) {
-            console.log(`🔍 [DEBUG PREÇO ZERO] ${item.name}: price=${item.price}, salePrice=${item.salePrice}, priceMin=${item.priceMin}`);
+        // USA A NOVA EXTRAÇÃO PROFUNDA
+        const extracted = extractDeepData(item);
+        const rawLink = item.link || item.url || "";
+        const finalStore = extracted.store || getStoreFromLink(rawLink, "Loja Parceira");
+
+        // Debug se ainda vier zerado
+        if (extracted.price === 0) {
+            // console.log(`🔍 [DEBUG 2] Zero Price: ${item.name}`); // Descomentar se necessário
         }
 
         return {
           id: String(item.id || item.productId || Math.random().toString(36)),
           name: item.name || item.productName || "Oferta",
-          price: price,
-          originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+          price: extracted.price,
+          originalPrice: extracted.originalPrice,
           discount: item.discount || 0,
-          link: item.link || item.url || "",
-          image: item.image || item.thumbnail || "",
-          store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
+          link: rawLink,
+          image: extracted.image || "",
+          store: finalStore,
           category: item.category?.name || item.categoryName || keyword,
           originKeyword: keyword,
           generatedMessage: "",
         };
       });
 
-      // RELAXAMENTO: Aceita produtos mesmo com preço 0 para diagnóstico
-      allProducts.push(...parsedItems);
-      
-      await new Promise(r => setTimeout(r, 1500));
+      allProducts.push(...parsedItems.filter(p => p.price > 0.01));
+      await new Promise(r => setTimeout(r, 1000));
     }
 
     // FALLBACK
     if (allProducts.length < 5) {
-      console.warn("⚠️ Busca específica falhou. Ativando busca GERAL...");
+      console.warn("⚠️ Busca específica fraca. Ativando busca GERAL...");
       const fb1 = await fetchAPI(new URLSearchParams({ page: "1", limit: "50", sort: "discount" }), "Fallback");
       
-      const parsedFb = fb1.map((item: any) => ({
-        id: String(item.id || item.productId || Math.random().toString(36)),
-        name: item.name || item.productName || "Oferta",
-        price: getBestPrice(item),
-        originalPrice: safeParseFloat(item.originalPrice),
-        discount: item.discount || 0,
-        link: item.link || item.url || "",
-        image: item.image || item.thumbnail || "",
-        store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
-        category: "Geral",
-        originKeyword: "Geral",
-        generatedMessage: "",
-      }));
-      allProducts.push(...parsedFb);
+      const parsedFb = fb1.map((item: any) => {
+          const extracted = extractDeepData(item);
+          return {
+            id: String(item.id || item.productId || Math.random().toString(36)),
+            name: item.name || item.productName || "Oferta",
+            price: extracted.price,
+            originalPrice: extracted.originalPrice,
+            discount: item.discount || 0,
+            link: item.link || item.url || "",
+            image: extracted.image || "",
+            store: extracted.store || getStoreFromLink(item.link || "", "Loja Parceira"),
+            category: "Geral",
+            originKeyword: "Geral",
+            generatedMessage: "",
+          };
+      });
+      allProducts.push(...parsedFb.filter(p => p.price > 0.01));
     }
 
-    // Remove duplicatas
     const uniqueProducts = Array.from(new Map(allProducts.map(item => [item.id, item])).values());
 
-    console.log(`✅ [Passo 1] Total Final: ${uniqueProducts.length} produtos.`);
+    console.log(`✅ [Passo 1] Total Final: ${uniqueProducts.length} produtos válidos.`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
@@ -210,7 +235,7 @@ const fetchProductsStep = createStep({
 // Passo 2: Filtrar
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
-  description: "Filters products",
+  description: "Filters 1 per category",
   inputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
@@ -240,7 +265,7 @@ const filterNewProductsStep = createStep({
       const selected: Product[] = [];
       const usedKeywords = new Set<string>();
 
-      // Tenta 1 por categoria
+      // Algoritmo: Tenta 1 por categoria
       for (const p of available) {
         const key = p.originKeyword || "geral";
         if (!usedKeywords.has(key)) {
