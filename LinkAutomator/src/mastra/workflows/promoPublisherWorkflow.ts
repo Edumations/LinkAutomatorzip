@@ -48,14 +48,15 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
+// Lista de Categorias
 const KEYWORDS = [
-  "Smart TV", "Smartphone", "Geladeira", "Notebook", "Air Fryer", 
-  "Ar Condicionado", "Monitor Gamer", "Cadeira Gamer", "Lavadora", 
+  "Smart TV", "Celular", "Geladeira", "Notebook", "Air Fryer", 
+  "Ar Condicionado", "Monitor", "Cadeira", "Lavadora", 
   "Fogão", "Microondas", "Iphone", "Samsung", "PlayStation",
-  "Fone Bluetooth", "Tablet", "Ventilador", "Sofá", "Guarda Roupa",
-  "Tênis", "Whey Protein", "Fralda", "Smartwatch",
-  "Cafeteira", "Aspirador", "Liquidificador", "Batedeira", "Teclado",
-  "Mouse", "Headset", "Câmera", "Drone", "Impressora", "Caixa de Som"
+  "Bluetooth", "Tablet", "Ventilador", "Sofá", "Guarda Roupa",
+  "Tênis", "Whey", "Fralda", "Relógio", "Cafeteira", 
+  "Aspirador", "Liquidificador", "Batedeira", "Teclado",
+  "Mouse", "Fone", "Câmera", "Drone", "Impressora", "Caixa de Som"
 ];
 
 function safeParseFloat(value: any): number {
@@ -77,7 +78,6 @@ function getBestPrice(item: any): number {
 function getStoreFromLink(link: string, fallback: string): string {
   if (!link) return fallback;
   const lower = link.toLowerCase();
-  
   const stores: Record<string, string> = {
     "amazon": "Amazon", "magalu": "Magalu", "magazineluiza": "Magalu",
     "shopee": "Shopee", "mercadolivre": "Mercado Livre", "casasbahia": "Casas Bahia",
@@ -85,19 +85,18 @@ function getStoreFromLink(link: string, fallback: string): string {
     "ponto": "Ponto Frio", "extra": "Extra", "kabum": "KaBuM!",
     "carrefour": "Carrefour", "friopecas": "FrioPeças", "frio peças": "FrioPeças",
     "brastemp": "Brastemp", "consul": "Consul", "electrolux": "Electrolux",
-    "nike": "Nike", "adidas": "Adidas", "netshoes": "Netshoes", "centauro": "Centauro"
+    "nike": "Nike", "adidas": "Adidas", "netshoes": "Netshoes"
   };
-
   for (const key in stores) {
     if (lower.includes(key)) return stores[key];
   }
   return fallback;
 }
 
-// Passo 1: Buscar Produtos (COM FALLBACK)
+// Passo 1: Buscar Produtos (SEQUENCIAL E ROBUSTO)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
-  description: "Fetches products",
+  description: "Fetches products sequentially",
   inputSchema: z.object({}),
   outputSchema: z.object({
     success: z.boolean(),
@@ -114,82 +113,80 @@ const fetchProductsStep = createStep({
           `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
           { method: "GET", headers: { "x-api-key": apiKey, "Content-Type": "application/json" } }
         );
-        if (!res.ok) return [];
+        if (!res.ok) {
+            console.error(`❌ API Error: ${res.status} - ${res.statusText}`);
+            return [];
+        }
         const data = await res.json();
         return data.data || [];
-      } catch { return []; }
+      } catch (e) { 
+        console.error("❌ Exception:", e);
+        return []; 
+      }
     };
 
-    // 1. Tenta buscar por categorias específicas
-    const shuffledKeywords = [...KEYWORDS].sort(() => 0.5 - Math.random());
-    const selectedKeywords = shuffledKeywords.slice(0, 15); // Reduzi para 15 para aliviar API
-    console.log(`🚀 [Passo 1] Tentando 15 categorias: ${selectedKeywords.join(", ")}`);
+    // Sorteia 20 categorias
+    const shuffled = [...KEYWORDS].sort(() => 0.5 - Math.random());
+    const targets = shuffled.slice(0, 20);
+    console.log(`🚀 [Passo 1] Buscando: ${targets.join(", ")}`);
 
-    const allProducts: Product[] = [];
-    const BATCH_SIZE = 5;
-    
-    for (let i = 0; i < selectedKeywords.length; i += BATCH_SIZE) {
-        const batch = selectedKeywords.slice(i, i + BATCH_SIZE);
-        const results = await Promise.all(batch.map(async (k) => {
-          const rawItems = await fetchAPI(new URLSearchParams({ keyword: k, sort: "discount", limit: "10" }));
-          return rawItems.map((item: any) => ({
-            id: String(item.id || item.productId || Math.random().toString(36)),
-            name: item.name || item.productName || "Oferta",
-            price: getBestPrice(item),
-            originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
-            discount: item.discount || 0,
-            link: item.link || item.url || "",
-            image: item.image || item.thumbnail || "",
-            store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
-            category: item.category?.name || item.categoryName || k,
-            originKeyword: k,
-            generatedMessage: "",
-          }));
-        }));
-        results.forEach(list => allProducts.push(...list));
-        // Pequeno delay entre batches para evitar bloqueio
-        await new Promise(r => setTimeout(r, 1000));
-    }
+    let allProducts: Product[] = [];
 
-    let validProducts = allProducts.filter(p => p.price > 0.01);
-    console.log(`📊 [Resultados] Específico encontrou: ${validProducts.length}`);
-
-    // 2. FALLBACK: Se encontrou pouco, faz uma busca GERAL (Top Ofertas)
-    if (validProducts.length < 10) {
-      console.log("⚠️ Poucos produtos encontrados. Ativando busca GERAL de emergência...");
-      const randomPage = Math.floor(Math.random() * 5) + 1;
-      const rawGeneral = await fetchAPI(new URLSearchParams({ page: String(randomPage), limit: "100", sort: "discount" }));
+    // Busca SEQUENCIAL para não travar a API (Rate Limit)
+    for (const keyword of targets) {
+      // Busca poucos itens (3) de cada categoria para ser rápido
+      const rawItems = await fetchAPI(new URLSearchParams({ keyword, sort: "discount", limit: "3" }));
       
-      const generalProducts = rawGeneral.map((item: any) => ({
-          id: String(item.id || item.productId || Math.random().toString(36)),
-          name: item.name || item.productName || "Oferta",
-          price: getBestPrice(item),
-          originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
-          discount: item.discount || 0,
-          link: item.link || item.url || "",
-          image: item.image || item.thumbnail || "",
-          store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
-          category: item.category?.name || item.categoryName || "Geral",
-          originKeyword: "Geral",
-          generatedMessage: "",
+      const parsedItems = rawItems.map((item: any) => ({
+        id: String(item.id || item.productId || Math.random().toString(36)),
+        name: item.name || item.productName || "Oferta",
+        price: getBestPrice(item),
+        originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+        discount: item.discount || 0,
+        link: item.link || item.url || "",
+        image: item.image || item.thumbnail || "",
+        store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
+        category: item.category?.name || item.categoryName || keyword,
+        originKeyword: keyword,
+        generatedMessage: "",
       }));
 
-      // Junta os produtos específicos com os gerais
-      validProducts = [...validProducts, ...generalProducts.filter((p: Product) => p.price > 0.01)];
+      // Adiciona apenas produtos válidos
+      allProducts.push(...parsedItems.filter(p => p.price > 0.01));
+      
+      // Pausa leve de 200ms entre requisições
+      await new Promise(r => setTimeout(r, 200));
     }
 
-    // Remove duplicatas por ID
-    const uniqueProducts = Array.from(new Map(validProducts.map(item => [item.id, item])).values());
+    // FALLBACK DE SEGURANÇA: Se a busca por categoria falhou (0 produtos), faz busca geral
+    if (allProducts.length < 5) {
+      console.warn("⚠️ Busca específica falhou. Ativando busca GERAL...");
+      const rawGeneral = await fetchAPI(new URLSearchParams({ page: "1", limit: "100", sort: "discount" }));
+      const generalParsed = rawGeneral.map((item: any) => ({
+        id: String(item.id || item.productId || Math.random().toString(36)),
+        name: item.name || item.productName || "Oferta",
+        price: getBestPrice(item),
+        originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+        discount: item.discount || 0,
+        link: item.link || item.url || "",
+        image: item.image || item.thumbnail || "",
+        store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
+        category: item.category?.name || item.categoryName || "Geral",
+        originKeyword: "Geral",
+        generatedMessage: "",
+      }));
+      allProducts = generalParsed.filter((p: Product) => p.price > 0.01);
+    }
 
-    console.log(`✅ [Passo 1] Total Final: ${uniqueProducts.length} produtos prontos.`);
-    return { success: true, products: uniqueProducts };
+    console.log(`✅ [Passo 1] Total encontrado: ${allProducts.length} produtos.`);
+    return { success: true, products: allProducts };
   },
 });
 
-// Passo 2: Filtrar
+// Passo 2: Filtrar (1 POR CATEGORIA)
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
-  description: "Filters products",
+  description: "Filters 1 per category",
   inputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
@@ -201,13 +198,15 @@ const filterNewProductsStep = createStep({
     alreadyPostedCount: z.number(),
   }),
   execute: async ({ inputData }) => {
-    console.log("🚀 [Passo 2] Filtrando...");
+    console.log("🚀 [Passo 2] Filtrando 1 por categoria...");
     if (!inputData.success || inputData.products.length === 0) {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
 
     try {
       const productIds = inputData.products.map((p) => p.id);
+      if (productIds.length === 0) return { success: false, newProducts: [], alreadyPostedCount: 0 };
+
       const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
       const result = await pool.query(
         `SELECT lomadee_product_id FROM posted_products WHERE lomadee_product_id IN (${placeholders})`,
@@ -219,27 +218,26 @@ const filterNewProductsStep = createStep({
       
       const selected: Product[] = [];
       const usedKeywords = new Set<string>();
-      
-      // ALGORITMO HÍBRIDO:
-      // 1. Prioridade para diversidade de Keywords
+
+      // Seleciona o primeiro disponível de cada categoria
       for (const p of available) {
-        if (selected.length >= 20) break;
-        const key = p.originKeyword || "geral";
-        if (!usedKeywords.has(key) && key !== "Geral") {
+        const key = p.originKeyword || p.category || "geral";
+        if (!usedKeywords.has(key)) {
           selected.push(p);
           usedKeywords.add(key);
         }
+        if (selected.length >= 20) break;
       }
 
-      // 2. Completa com qualquer coisa (inclusive Geral) até dar 20
-      if (selected.length < 20) {
+      // Se não deu 20 (porque algumas categorias vieram vazias), completa com o resto
+      if (selected.length < 10) {
         for (const p of available) {
-          if (selected.length >= 20) break;
-          if (!selected.some(s => s.id === p.id)) selected.push(p);
+            if (selected.length >= 20) break;
+            if (!selected.some(s => s.id === p.id)) selected.push(p);
         }
       }
 
-      console.log(`✅ [Passo 2] ${selected.length} produtos novos selecionados.`);
+      console.log(`✅ [Passo 2] ${selected.length} produtos selecionados para envio.`);
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
     } catch {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
@@ -278,7 +276,7 @@ const generateCopyStep = createStep({
                 PREÇO: ${priceText}
                 LOJA: ${p.store}
                 LINK: ${p.link}
-                Legenda Telegram Curta. Emoji. OBRIGATÓRIO PREÇO: ${priceText}. Final: 👇 Link:
+                Crie legenda Telegram curta com emoji. OBRIGATÓRIO PREÇO: ${priceText}. Final: 👇 Link:
             `;
             try {
                 const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
@@ -324,7 +322,7 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
 
     if (!res.ok) {
       body.parse_mode = undefined;
-      // Retry texto se foto falhar
+      // Retry como texto se imagem falhar
       if (endpoint === "sendPhoto") {
           const fallbackBody = { chat_id: chat, text: text };
           res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -363,7 +361,7 @@ const publishStep = createStep({
       if (await sendTelegramMessage(p)) {
         await markPosted(p.id);
         count++;
-        console.log(`✅ [${count}] Enviado: ${p.category} -> ${p.name}`);
+        console.log(`✅ [${count}] Enviado: ${p.originKeyword} -> ${p.name}`);
         await new Promise(r => setTimeout(r, 3000));
       }
     }
