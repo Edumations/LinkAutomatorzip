@@ -92,7 +92,7 @@ function getStoreFromLink(link: string, fallback: string): string {
   return fallback;
 }
 
-// Passo 1: Buscar Produtos (COM DIAGNÓSTICO)
+// Passo 1: Buscar Produtos (COM DEBUG PROFUNDO)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products sequentially",
@@ -104,7 +104,7 @@ const fetchProductsStep = createStep({
   }),
   execute: async ({ mastra }) => {
     const apiKey = process.env.LOMADEE_API_KEY;
-    const sourceId = process.env.LOMADEE_SOURCE_ID; // Opcional, mas bom ter
+    const sourceId = process.env.LOMADEE_SOURCE_ID; // AGORA USADO SE DISPONÍVEL
     
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
@@ -124,88 +124,83 @@ const fetchProductsStep = createStep({
         
         const data = await res.json();
         
-        // DIAGNÓSTICO CRÍTICO: Se vier vazio, mostra o porquê
         if (!data.data || data.data.length === 0) {
-            console.warn(`⚠️ [${label}] Resposta Vazia. Raw:`, JSON.stringify(data).substring(0, 200));
             return [];
         }
         
         return data.data;
       } catch (e) { 
-        console.error(`❌ [${label}] Exception:`, e);
         return []; 
       }
     };
 
-    // Sorteia 15 categorias (reduzido para garantir performance)
+    // Sorteia 10 categorias (Reduzido para teste de estabilidade)
     const shuffled = [...KEYWORDS].sort(() => 0.5 - Math.random());
-    const targets = shuffled.slice(0, 15);
+    const targets = shuffled.slice(0, 10);
     console.log(`🚀 [Passo 1] Buscando: ${targets.join(", ")}`);
 
     let allProducts: Product[] = [];
 
-    // 1. Busca Sequencial Lenta (1.5s delay)
+    // Busca Sequencial
     for (const keyword of targets) {
+      // Pega 2 produtos por categoria para garantir pelo menos 1 bom
       const rawItems = await fetchAPI(
-          new URLSearchParams({ keyword, sort: "discount", limit: "3" }), 
+          new URLSearchParams({ keyword, sort: "discount", limit: "2" }), 
           `Cat: ${keyword}`
       );
       
-      const parsedItems = rawItems.map((item: any) => ({
+      const parsedItems = rawItems.map((item: any) => {
+        const price = getBestPrice(item);
+        
+        // DEBUG: Se o preço for 0, mostra o que veio da API
+        if (price === 0) {
+            console.log(`🔍 [DEBUG PREÇO ZERO] ${item.name}: price=${item.price}, salePrice=${item.salePrice}, priceMin=${item.priceMin}`);
+        }
+
+        return {
+          id: String(item.id || item.productId || Math.random().toString(36)),
+          name: item.name || item.productName || "Oferta",
+          price: price,
+          originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+          discount: item.discount || 0,
+          link: item.link || item.url || "",
+          image: item.image || item.thumbnail || "",
+          store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
+          category: item.category?.name || item.categoryName || keyword,
+          originKeyword: keyword,
+          generatedMessage: "",
+        };
+      });
+
+      // RELAXAMENTO: Aceita produtos mesmo com preço 0 para diagnóstico
+      allProducts.push(...parsedItems);
+      
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    // FALLBACK
+    if (allProducts.length < 5) {
+      console.warn("⚠️ Busca específica falhou. Ativando busca GERAL...");
+      const fb1 = await fetchAPI(new URLSearchParams({ page: "1", limit: "50", sort: "discount" }), "Fallback");
+      
+      const parsedFb = fb1.map((item: any) => ({
         id: String(item.id || item.productId || Math.random().toString(36)),
         name: item.name || item.productName || "Oferta",
         price: getBestPrice(item),
-        originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+        originalPrice: safeParseFloat(item.originalPrice),
         discount: item.discount || 0,
         link: item.link || item.url || "",
         image: item.image || item.thumbnail || "",
         store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
-        category: item.category?.name || item.categoryName || keyword,
-        originKeyword: keyword,
+        category: "Geral",
+        originKeyword: "Geral",
         generatedMessage: "",
       }));
-
-      allProducts.push(...parsedItems.filter(p => p.price > 0.01));
-      
-      // Delay AUMENTADO para evitar bloqueio
-      await new Promise(r => setTimeout(r, 1500));
-    }
-
-    // 2. FALLBACK EM CASCATA
-    let validProducts = allProducts;
-    
-    if (validProducts.length < 5) {
-      console.warn("⚠️ Busca específica falhou. Tentando Fallback 1: Top Ofertas...");
-      const fb1 = await fetchAPI(new URLSearchParams({ page: "1", limit: "50", sort: "discount" }), "Fallback 1");
-      
-      if ((!fb1 || fb1.length === 0)) {
-         console.warn("⚠️ Fallback 1 vazio. Tentando Fallback 2: Sem Ordenação...");
-         const fb2 = await fetchAPI(new URLSearchParams({ page: "1", limit: "50" }), "Fallback 2");
-         if (fb2) validProducts.push(...parseList(fb2, "Geral"));
-      } else {
-         validProducts.push(...parseList(fb1, "Geral"));
-      }
-    }
-
-    // Função auxiliar para parsear listas de fallback
-    function parseList(list: any[], cat: string) {
-        return list.map((item: any) => ({
-            id: String(item.id || item.productId || Math.random().toString(36)),
-            name: item.name || item.productName || "Oferta",
-            price: getBestPrice(item),
-            originalPrice: safeParseFloat(item.originalPrice),
-            discount: item.discount || 0,
-            link: item.link || item.url || "",
-            image: item.image || item.thumbnail || "",
-            store: item.store?.name || getStoreFromLink(item.link || "", "Loja Parceira"),
-            category: cat,
-            originKeyword: cat,
-            generatedMessage: "",
-        })).filter(p => p.price > 0.01);
+      allProducts.push(...parsedFb);
     }
 
     // Remove duplicatas
-    const uniqueProducts = Array.from(new Map(validProducts.map(item => [item.id, item])).values());
+    const uniqueProducts = Array.from(new Map(allProducts.map(item => [item.id, item])).values());
 
     console.log(`✅ [Passo 1] Total Final: ${uniqueProducts.length} produtos.`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
@@ -215,7 +210,7 @@ const fetchProductsStep = createStep({
 // Passo 2: Filtrar
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
-  description: "Filters 1 per category",
+  description: "Filters products",
   inputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
@@ -228,7 +223,6 @@ const filterNewProductsStep = createStep({
   }),
   execute: async ({ inputData }) => {
     if (!inputData.success || inputData.products.length === 0) {
-        console.log("⚠️ Nenhuma entrada para filtrar.");
         return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
 
@@ -246,7 +240,7 @@ const filterNewProductsStep = createStep({
       const selected: Product[] = [];
       const usedKeywords = new Set<string>();
 
-      // Algoritmo: Tenta 1 por categoria
+      // Tenta 1 por categoria
       for (const p of available) {
         const key = p.originKeyword || "geral";
         if (!usedKeywords.has(key)) {
@@ -285,6 +279,7 @@ const generateCopyStep = createStep({
     enrichedProducts: z.array(ProductSchema),
   }),
   execute: async ({ inputData, mastra }) => {
+    console.log(`🚀 [Passo 3] Gerando textos...`);
     if (!inputData.success || inputData.newProducts.length === 0) {
       return { success: true, enrichedProducts: [] };
     }
@@ -296,13 +291,16 @@ const generateCopyStep = createStep({
     for (let i = 0; i < enrichedProducts.length; i += batchSize) {
         const batch = enrichedProducts.slice(i, i + batchSize);
         await Promise.all(batch.map(async (p) => {
-            const priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
+            const priceText = p.price > 0 
+                ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price)
+                : "Confira no site!";
+                
             const prompt = `
                 PRODUTO: ${p.name}
                 PREÇO: ${priceText}
                 LOJA: ${p.store}
                 LINK: ${p.link}
-                Legenda Telegram Curta. Emoji. OBRIGATÓRIO PREÇO: ${priceText}. Final: 👇 Link:
+                Crie legenda Telegram curta com emoji. OBRIGATÓRIO PREÇO: ${priceText}. Final: 👇 Link:
             `;
             try {
                 const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
@@ -324,7 +322,10 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
   if (!token || !chat) return false;
 
   try {
-    const priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
+    const priceText = product.price > 0 
+        ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price)
+        : "Confira no site!";
+        
     let text = product.generatedMessage || "";
 
     if (!text || !text.includes("R$")) {
