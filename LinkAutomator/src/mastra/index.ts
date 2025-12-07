@@ -1,339 +1,112 @@
-import { createStep, createWorkflow } from "@mastra/core/workflows";
-import { z } from "zod";
-import pg from "pg";
+globalThis.__MASTRA_TELEMETRY__ = true;
 
-const { Pool } = pg;
+import { Mastra } from "@mastra/core";
+import { PinoLogger } from "@mastra/loggers";
+import { LogLevel, MastraLogger } from "@mastra/core/logger";
+import pino from "pino";
+import { MCPServer } from "@mastra/mcp";
+import cron from "node-cron"; 
 
-// Configuração do Banco de Dados com SSL
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
+import { sharedPostgresStorage } from "./storage";
+import { inngest, inngestServe } from "./inngest";
 
-async function setupDatabase() {
-  if (!process.env.DATABASE_URL) return;
-  try {
-    const client = await pool.connect();
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS posted_products (
-        id SERIAL PRIMARY KEY,
-        lomadee_product_id VARCHAR(255) UNIQUE NOT NULL,
-        product_name TEXT,
-        product_link TEXT,
-        product_price DECIMAL(10, 2),
-        posted_telegram BOOLEAN DEFAULT FALSE,
-        posted_at TIMESTAMP DEFAULT NOW()
-      );
-    `);
-    client.release();
-  } catch (err) {
-    console.error("❌ Erro DB:", err);
-  }
-}
+// Seus agentes e workflows
+import { promoPublisherAgent } from "./agents/promoPublisherAgent";
+import { promoPublisherWorkflow } from "./workflows/promoPublisherWorkflow";
 
-setupDatabase();
+// Suas ferramentas
+import { lomadeeTool } from "./tools/lomadeeTool";
+import { telegramTool } from "./tools/telegramTool";
+import {
+  checkPostedProductsTool,
+  markProductAsPostedTool,
+  getRecentlyPostedProductsTool,
+} from "./tools/productTrackerTool";
 
-const ProductSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  price: z.number(),
-  originalPrice: z.number().optional(),
-  discount: z.number().optional(),
-  link: z.string(),
-  image: z.string().optional(),
-  store: z.string().optional(),
-  category: z.string().optional(),
-  generatedMessage: z.string().optional(),
-});
+console.log("=== INICIALIZANDO BOT NO RENDER ===");
+const RENDER_PORT = parseInt(process.env.PORT || "5000");
+console.log(`📡 Porta configurada: ${RENDER_PORT}`);
 
-type Product = z.infer<typeof ProductSchema>;
-
-function safeParseFloat(value: any): number {
-  if (typeof value === "number") return value;
-  if (!value) return 0;
-  let str = String(value);
-  if (str.includes(",") && str.includes(".")) str = str.replace(/\./g, "");
-  str = str.replace(",", ".");
-  str = str.replace(/[^0-9.]/g, "");
-  return parseFloat(str) || 0;
-}
-
-function getStoreFromLink(link: string, fallback: string): string {
-  if (!link) return fallback;
-  const lower = link.toLowerCase();
-  if (lower.includes("amazon")) return "Amazon";
-  if (lower.includes("magalu") || lower.includes("magazineluiza")) return "Magalu";
-  if (lower.includes("shopee")) return "Shopee";
-  if (lower.includes("mercadolivre")) return "Mercado Livre";
-  if (lower.includes("casasbahia")) return "Casas Bahia";
-  if (lower.includes("americanas")) return "Americanas";
-  if (lower.includes("girafa")) return "Girafa";
-  if (lower.includes("fastshop")) return "Fast Shop";
-  return fallback;
-}
-
-// Passo 1: Buscar Produtos (COM DEBUG E CORREÇÃO DE PREÇO)
-const fetchProductsStep = createStep({
-  id: "fetch-lomadee-products",
-  description: "Fetches products",
-  inputSchema: z.object({}),
-  outputSchema: z.object({
-    success: z.boolean(),
-    products: z.array(ProductSchema),
-    error: z.string().optional(),
-  }),
-  execute: async ({ mastra }) => {
-    console.log("🚀 [Passo 1] Buscando produtos...");
-    const apiKey = process.env.LOMADEE_API_KEY;
-    if (!apiKey) return { success: false, products: [], error: "Missing Key" };
-
-    try {
-      const params = new URLSearchParams({ page: "1", limit: "60", sort: "discount" });
-      const response = await fetch(
-        `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
-        {
-          method: "GET",
-          headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
-        }
-      );
-
-      if (!response.ok) return { success: false, products: [], error: `API Error` };
-
-      const data = await response.json();
-      
-      // --- DEBUG: LOGAR O PRIMEIRO PRODUTO PARA VER OS CAMPOS ---
-      if (data.data && data.data.length > 0) {
-        console.log("🔍 [DEBUG API] Estrutura do produto:", JSON.stringify(data.data[0]));
-      }
-      // ---------------------------------------------------------
-
-      const products: Product[] = (data.data || []).map((item: any) => {
-        const rawLink = item.link || item.url || "";
-        const storeName = item.store?.name || getStoreFromLink(rawLink, "Loja Parceira");
-        
-        // TENTA VÁRIOS CAMPOS DE PREÇO
-        const rawPrice = item.price || item.salePrice || item.priceMin || item.priceMax || 0;
-        
-        return {
-          id: String(item.id || item.productId || Math.random().toString(36)),
-          name: item.name || item.productName || "Produto Oferta",
-          price: safeParseFloat(rawPrice),
-          originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
-          discount: item.discount || 0,
-          link: rawLink,
-          image: item.image || item.thumbnail || "",
-          store: storeName,
-          category: item.category?.name || item.categoryName || "Geral",
-          generatedMessage: "",
-        };
-      });
-
-      console.log(`✅ [Passo 1] ${products.length} produtos encontrados.`);
-      return { success: true, products }; // Removemos o filtro price > 0 para não travar
-    } catch (error) {
-      console.error("❌ Erro fetch:", error);
-      return { success: false, products: [], error: String(error) };
-    }
-  },
-});
-
-// Passo 2: Filtrar com Diversidade
-const filterNewProductsStep = createStep({
-  id: "filter-new-products",
-  description: "Filters products",
-  inputSchema: z.object({
-    success: z.boolean(),
-    products: z.array(ProductSchema),
-    error: z.string().optional(),
-  }),
-  outputSchema: z.object({
-    success: z.boolean(),
-    newProducts: z.array(ProductSchema),
-    alreadyPostedCount: z.number(),
-  }),
-  execute: async ({ inputData }) => {
-    console.log("🚀 [Passo 2] Filtrando...");
-    if (!inputData.success || inputData.products.length === 0) {
-      return { success: false, newProducts: [], alreadyPostedCount: 0 };
-    }
-
-    try {
-      const productIds = inputData.products.map((p) => p.id);
-      const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
-      const result = await pool.query(
-        `SELECT lomadee_product_id FROM posted_products WHERE lomadee_product_id IN (${placeholders})`,
-        productIds
-      );
-
-      const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
-      const available = inputData.products.filter((p) => !postedIds.has(p.id));
-      
-      const selected: Product[] = [];
-      const usedStores = new Set<string>();
-      const MAX = 3;
-
-      for (const p of available) {
-        if (selected.length >= MAX) break;
-        const sKey = p.store.toLowerCase();
-        if (!usedStores.has(sKey) || sKey === "loja parceira") {
-          selected.push(p);
-          if (sKey !== "loja parceira") usedStores.add(sKey);
-        }
-      }
-
-      if (selected.length < MAX) {
-        for (const p of available) {
-          if (selected.length >= MAX) break;
-          if (!selected.some(s => s.id === p.id)) selected.push(p);
-        }
-      }
-
-      console.log(`✅ [Passo 2] Selecionados: ${selected.length}`);
-      return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
-    } catch {
-      return { success: false, newProducts: [], alreadyPostedCount: 0 };
-    }
-  },
-});
-
-// Passo 3: IA (Adaptada para preço zero)
-const generateCopyStep = createStep({
-  id: "generate-copy",
-  description: "AI Copywriting",
-  inputSchema: z.object({
-    success: z.boolean(),
-    newProducts: z.array(ProductSchema),
-  }),
-  outputSchema: z.object({
-    success: z.boolean(),
-    enrichedProducts: z.array(ProductSchema),
-  }),
-  execute: async ({ inputData, mastra }) => {
-    console.log("🚀 [Passo 3] Criando textos...");
-    if (!inputData.success || inputData.newProducts.length === 0) {
-      return { success: true, enrichedProducts: [] };
-    }
-
-    const agent = mastra?.getAgent("promoPublisherAgent");
-    const enrichedProducts = [...inputData.newProducts];
-
-    for (let i = 0; i < enrichedProducts.length; i++) {
-      const p = enrichedProducts[i];
-      let priceText = "Confira no site";
-      
-      if (p.price > 0) {
-        priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
-      }
-      
-      const prompt = `
-        PRODUTO: ${p.name}
-        PREÇO: ${priceText}
-        LOJA: ${p.store}
-        LINK: ${p.link}
-        
-        Crie uma legenda para Telegram.
-        1. Use emoji de fogo/alerta.
-        2. Texto curto.
-        3. CITE O PREÇO: ${priceText}
-        4. Finalize com chamada para o link.
-      `;
-
-      try {
-        const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
-        p.generatedMessage = result?.text || "";
-      } catch (error) {
-        p.generatedMessage = ""; 
-      }
-    }
-
-    return { success: true, enrichedProducts };
-  },
-});
-
-// Envio e Marcação
-async function sendTelegramMessage(product: Product): Promise<boolean> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chat = process.env.TELEGRAM_CHANNEL_ID;
-  if (!token || !chat) return false;
-
-  try {
-    let priceText = "Confira no site!";
-    if (product.price > 0) {
-        priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
-    }
-
-    let text = product.generatedMessage || "";
-
-    // Fallback se a IA falhar
-    if (!text) {
-      text = `🔥 *OFERTA IMPERDÍVEL*\n\n📦 ${product.name}\n\n💰 *${priceText}*\n\n👇 Link Oficial:`;
-    }
-
-    if (!text.includes(product.link)) text += `\n${product.link}`;
-
-    const endpoint = product.image ? "sendPhoto" : "sendMessage";
-    const body: any = { chat_id: chat, parse_mode: "Markdown" };
-
-    if (product.image) {
-      body.photo = product.image;
-      body.caption = text;
-    } else {
-      body.text = text;
-    }
-
-    let res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+// Logger customizado para produção
+class ProductionPinoLogger extends MastraLogger {
+  protected logger: pino.Logger;
+  constructor(options: { name?: string; level?: LogLevel } = {}) {
+    super(options);
+    this.logger = pino({
+      name: options.name || "app",
+      level: options.level || LogLevel.INFO,
+      timestamp: () => `,"time":"${new Date(Date.now()).toISOString()}"`,
     });
-
-    if (!res.ok) {
-      body.parse_mode = undefined;
-      res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
-      });
-    }
-
-    return res.ok;
-  } catch {
-    return false;
   }
+  debug(msg: string, args: any = {}) { this.logger.debug(args, msg); }
+  info(msg: string, args: any = {}) { this.logger.info(args, msg); }
+  warn(msg: string, args: any = {}) { this.logger.warn(args, msg); }
+  error(msg: string, args: any = {}) { this.logger.error(args, msg); }
 }
 
-async function markPosted(id: string) {
+// AQUI ESTÁ A EXPORTAÇÃO QUE ESTAVA FALTANDO
+export const mastra = new Mastra({
+  storage: sharedPostgresStorage,
+  workflows: { promoPublisherWorkflow },
+  agents: { promoPublisherAgent },
+  mcpServers: {
+    allTools: new MCPServer({
+      name: "allTools",
+      version: "1.0.0",
+      tools: {
+        lomadeeTool,
+        telegramTool,
+        checkPostedProductsTool,
+        markProductAsPostedTool,
+        getRecentlyPostedProductsTool,
+      },
+    }),
+  },
+  server: {
+    host: "0.0.0.0",
+    port: RENDER_PORT, 
+    apiRoutes: [
+      {
+        path: "/api/inngest",
+        method: "ALL",
+        createHandler: async ({ mastra }) => inngestServe({ mastra, inngest }),
+      },
+      {
+        path: "/",
+        method: "GET",
+        handler: async (c) => c.text("Mastra Bot is Running & Healthy! 🚀"),
+      },
+    ],
+  },
+  logger: new ProductionPinoLogger({ name: "Mastra", level: "info" }),
+});
+
+// Agendador Interno (Configurado para 30 minutos)
+const cronExpression = process.env.SCHEDULE_CRON_EXPRESSION || "*/30 * * * *";
+
+console.log(`⏰ Agendador iniciado: "${cronExpression}"`);
+
+cron.schedule(cronExpression, async () => {
+  console.log("🚀 [CRON] Iniciando ciclo de publicação de ofertas (20 itens)...");
   try {
-    await pool.query(`INSERT INTO posted_products (lomadee_product_id, posted_telegram) VALUES ($1, TRUE) ON CONFLICT (lomadee_product_id) DO NOTHING`, [id]);
-  } catch {}
-}
-
-const publishStep = createStep({
-  id: "publish",
-  description: "Publish",
-  inputSchema: z.object({ success: z.boolean(), enrichedProducts: z.array(ProductSchema) }),
-  outputSchema: z.object({ success: z.boolean(), count: z.number() }),
-  execute: async ({ inputData }) => {
-    console.log("🚀 [Passo 4] Publicando...");
-    if (!inputData.success) return { success: true, count: 0 };
-    let count = 0;
-    for (const p of inputData.enrichedProducts) {
-      if (await sendTelegramMessage(p)) {
-        await markPosted(p.id);
-        count++;
-        console.log(`✅ [SUCESSO] Postado: ${p.name}`);
-        await new Promise(r => setTimeout(r, 2000));
-      }
+    const workflow = mastra.getWorkflow("promoPublisherWorkflow");
+    if (workflow) {
+      const run = await workflow.createRunAsync();
+      const result = await run.start({ inputData: {} });
+      console.log("✅ [CRON] Workflow disparado. ID:", result.runId);
     }
-    return { success: true, count };
+  } catch (error) {
+    console.error("❌ [CRON] Falha ao executar workflow:", error);
   }
 });
 
-export const promoPublisherWorkflow = createWorkflow({
-  id: "promo-workflow",
-  inputSchema: z.object({}),
-  outputSchema: z.object({ success: z.boolean(), count: z.number() }),
-})
-  .then(fetchProductsStep)
-  .then(filterNewProductsStep)
-  .then(generateCopyStep)
-  .then(publishStep)
-  .commit();
+// Teste inicial rápido (10 segundos após o boot)
+setTimeout(async () => {
+  console.log("⚡ [STARTUP] Executando rodada de teste inicial...");
+  try {
+    const workflow = mastra.getWorkflow("promoPublisherWorkflow");
+    if (workflow) {
+      await workflow.createRunAsync().then(run => run.start({ inputData: {} }));
+    }
+  } catch (e) { console.error(e); }
+}, 10000);
