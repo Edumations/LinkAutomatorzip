@@ -47,7 +47,7 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
-// Lista de categorias para garantir variedade a cada execução
+// Lista de categorias para garantir variedade
 const KEYWORDS = [
   "Smart TV", "Smartphone", "Geladeira", "Notebook", "Air Fryer", 
   "Ar Condicionado", "Monitor Gamer", "Cadeira Gamer", "Lavadora", 
@@ -59,11 +59,37 @@ function safeParseFloat(value: any): number {
   if (typeof value === "number") return value;
   if (!value) return 0;
   let str = String(value);
-  // Se for formato brasileiro "1.200,50"
   if (str.includes(",") && str.includes(".")) str = str.replace(/\./g, "");
   str = str.replace(",", ".");
   str = str.replace(/[^0-9.]/g, "");
   return parseFloat(str) || 0;
+}
+
+// NOVA LÓGICA DE EXTRAÇÃO DE DADOS PROFUNDA
+function extractProductData(item: any) {
+  let price = safeParseFloat(item.price || item.salePrice || item.priceMin || item.priceMax);
+  let originalPrice = safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax);
+  let store = item.store?.name || item.storeName || item.advertiser?.name;
+
+  // Se não achou na raiz, procura dentro de 'options' (Estrutura FrioPeças/Lomadee V3)
+  if ((price === 0 || !store) && item.options && item.options.length > 0) {
+    const opt = item.options[0];
+    
+    // Tenta pegar preço dentro de pricing
+    if (opt.pricing && opt.pricing.length > 0) {
+        const p = opt.pricing[0];
+        if (price === 0) price = safeParseFloat(p.price || p.salePrice);
+        if (originalPrice === 0) originalPrice = safeParseFloat(p.listPrice || p.priceFrom);
+    }
+    
+    // Tenta pegar preço direto na option
+    if (price === 0) price = safeParseFloat(opt.price);
+
+    // Tenta pegar loja
+    if (!store) store = opt.seller?.name || opt.seller;
+  }
+
+  return { price, originalPrice, store };
 }
 
 function getStoreFromLink(link: string, fallback: string): string {
@@ -86,7 +112,7 @@ function getStoreFromLink(link: string, fallback: string): string {
   return fallback;
 }
 
-// Passo 1: Buscar Produtos (POR PALAVRA-CHAVE)
+// Passo 1: Buscar Produtos
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products",
@@ -101,13 +127,12 @@ const fetchProductsStep = createStep({
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
     try {
-      // Sorteia uma categoria para esta rodada
       const randomKeyword = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
       console.log(`🚀 [Passo 1] Buscando ofertas de: "${randomKeyword}"`);
 
       const params = new URLSearchParams({ 
         keyword: randomKeyword,
-        sort: "discount", // Volta para desconto, mas focado na categoria
+        sort: "discount",
         limit: "50"
       });
 
@@ -125,35 +150,30 @@ const fetchProductsStep = createStep({
       
       const products: Product[] = (data.data || []).map((item: any) => {
         const rawLink = item.link || item.url || "";
-        const storeName = item.store?.name || getStoreFromLink(rawLink, "Loja Parceira");
         
-        // Tenta pegar o preço de todos os lugares possíveis
-        const rawPrice = item.price || item.salePrice || item.priceMin || item.priceMax || 0;
-        const finalPrice = safeParseFloat(rawPrice);
-
-        // DEBUG SE O PREÇO FOR ZERO
-        if (finalPrice === 0) {
-           console.log(`⚠️ Produto sem preço (${item.name || item.productName}):`, JSON.stringify(item));
-        }
+        // USA A NOVA FUNÇÃO DE EXTRAÇÃO
+        const extracted = extractProductData(item);
+        
+        // Se ainda não achou a loja, tenta pelo link
+        const finalStore = extracted.store || getStoreFromLink(rawLink, "Loja Parceira");
 
         return {
           id: String(item.id || item.productId || Math.random().toString(36)),
           name: item.name || item.productName || "Produto Oferta",
-          price: finalPrice,
-          originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+          price: extracted.price, // Preço corrigido
+          originalPrice: extracted.originalPrice,
           discount: item.discount || 0,
           link: rawLink,
           image: item.image || item.thumbnail || "",
-          store: storeName,
-          category: item.category?.name || item.categoryName || randomKeyword, // Usa a keyword se não tiver cat
+          store: finalStore,
+          category: item.category?.name || item.categoryName || randomKeyword,
           generatedMessage: "",
         };
       });
 
-      // Filtra produtos sem preço válido
       const validProducts = products.filter(p => p.price > 0.01);
       
-      console.log(`✅ [Passo 1] Encontrados: ${validProducts.length} produtos de ${randomKeyword}`);
+      console.log(`✅ [Passo 1] Encontrados: ${validProducts.length} produtos válidos (com preço).`);
       return { success: true, products: validProducts };
     } catch (error) {
       console.error("Erro fetch:", error);
@@ -193,8 +213,7 @@ const filterNewProductsStep = createStep({
       const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
       const available = inputData.products.filter((p) => !postedIds.has(p.id));
       
-      // Como já buscamos por categoria específica, podemos pegar os Top 20 disponíveis
-      // A diversidade virá da rotação de categorias a cada hora
+      // Seleciona até 20 produtos
       const selected = available.slice(0, 20);
 
       console.log(`✅ [Passo 2] ${selected.length} produtos novos para postar.`);
@@ -226,7 +245,6 @@ const generateCopyStep = createStep({
     const agent = mastra?.getAgent("promoPublisherAgent");
     const enrichedProducts = [...inputData.newProducts];
 
-    // Processamento em lote para agilizar
     const batchSize = 5;
     for (let i = 0; i < enrichedProducts.length; i += batchSize) {
         const batch = enrichedProducts.slice(i, i + batchSize);
@@ -316,7 +334,6 @@ const publishStep = createStep({
         await markPosted(p.id);
         count++;
         console.log(`✅ [${count}] Enviado: ${p.name} - R$ ${p.price}`);
-        // Delay para evitar flood (2.5s)
         await new Promise(r => setTimeout(r, 2500));
       }
     }
