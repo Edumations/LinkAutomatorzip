@@ -43,16 +43,20 @@ const ProductSchema = z.object({
   store: z.string().optional(),
   category: z.string().optional(),
   generatedMessage: z.string().optional(),
+  originKeyword: z.string().optional(), // Para rastrear a categoria de origem
 });
 
 type Product = z.infer<typeof ProductSchema>;
 
-// Lista de categorias para garantir variedade
+// Lista Expandida de Categorias (Mais de 30 opções para garantir variedade)
 const KEYWORDS = [
   "Smart TV", "Smartphone", "Geladeira", "Notebook", "Air Fryer", 
   "Ar Condicionado", "Monitor Gamer", "Cadeira Gamer", "Lavadora", 
   "Fogão", "Microondas", "Iphone 15", "Samsung Galaxy", "PlayStation 5",
-  "Fone Bluetooth", "Tablet", "Ventilador", "Sofá", "Guarda Roupa"
+  "Fone Bluetooth", "Tablet", "Ventilador", "Sofá", "Guarda Roupa",
+  "Tênis Nike", "Tênis Adidas", "Whey Protein", "Fralda", "Smartwatch",
+  "Cafeteira", "Aspirador Robô", "Liquidificador", "Batedeira", "Teclado Gamer",
+  "Mouse Gamer", "Headset", "Câmera", "Drone", "Impressora", "Caixa de Som JBL"
 ];
 
 function safeParseFloat(value: any): number {
@@ -65,31 +69,10 @@ function safeParseFloat(value: any): number {
   return parseFloat(str) || 0;
 }
 
-// NOVA LÓGICA DE EXTRAÇÃO DE DADOS PROFUNDA
-function extractProductData(item: any) {
-  let price = safeParseFloat(item.price || item.salePrice || item.priceMin || item.priceMax);
-  let originalPrice = safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax);
-  let store = item.store?.name || item.storeName || item.advertiser?.name;
-
-  // Se não achou na raiz, procura dentro de 'options' (Estrutura FrioPeças/Lomadee V3)
-  if ((price === 0 || !store) && item.options && item.options.length > 0) {
-    const opt = item.options[0];
-    
-    // Tenta pegar preço dentro de pricing
-    if (opt.pricing && opt.pricing.length > 0) {
-        const p = opt.pricing[0];
-        if (price === 0) price = safeParseFloat(p.price || p.salePrice);
-        if (originalPrice === 0) originalPrice = safeParseFloat(p.listPrice || p.priceFrom);
-    }
-    
-    // Tenta pegar preço direto na option
-    if (price === 0) price = safeParseFloat(opt.price);
-
-    // Tenta pegar loja
-    if (!store) store = opt.seller?.name || opt.seller;
-  }
-
-  return { price, originalPrice, store };
+function getBestPrice(item: any): number {
+  const possibilities = [item.price, item.salePrice, item.priceMin, item.priceMax];
+  const validPrices = possibilities.map(safeParseFloat).filter(p => p > 0);
+  return validPrices.length > 0 ? Math.min(...validPrices) : 0;
 }
 
 function getStoreFromLink(link: string, fallback: string): string {
@@ -103,7 +86,7 @@ function getStoreFromLink(link: string, fallback: string): string {
     "ponto": "Ponto Frio", "extra": "Extra", "kabum": "KaBuM!",
     "carrefour": "Carrefour", "friopecas": "FrioPeças", "frio peças": "FrioPeças",
     "brastemp": "Brastemp", "consul": "Consul", "electrolux": "Electrolux",
-    "nike": "Nike", "adidas": "Adidas", "netshoes": "Netshoes"
+    "nike": "Nike", "adidas": "Adidas", "netshoes": "Netshoes", "centauro": "Centauro"
   };
 
   for (const key in stores) {
@@ -112,10 +95,10 @@ function getStoreFromLink(link: string, fallback: string): string {
   return fallback;
 }
 
-// Passo 1: Buscar Produtos
+// Passo 1: Buscar Produtos (20 CATEGORIAS x 1 PRODUTO)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
-  description: "Fetches products",
+  description: "Fetches products from 20 different categories",
   inputSchema: z.object({}),
   outputSchema: z.object({
     success: z.boolean(),
@@ -126,66 +109,73 @@ const fetchProductsStep = createStep({
     const apiKey = process.env.LOMADEE_API_KEY;
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
-    try {
-      const randomKeyword = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
-      console.log(`🚀 [Passo 1] Buscando ofertas de: "${randomKeyword}"`);
+    // Sorteia 20 categorias diferentes
+    const shuffledKeywords = [...KEYWORDS].sort(() => 0.5 - Math.random());
+    const selectedKeywords = shuffledKeywords.slice(0, 20);
 
-      const params = new URLSearchParams({ 
-        keyword: randomKeyword,
-        sort: "discount",
-        limit: "50"
-      });
+    console.log(`🚀 [Passo 1] Categorias selecionadas: ${selectedKeywords.join(", ")}`);
 
-      const response = await fetch(
-        `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
-        {
-          method: "GET",
-          headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
-        }
-      );
-
-      if (!response.ok) return { success: false, products: [], error: `API Error` };
-
-      const data = await response.json();
-      
-      const products: Product[] = (data.data || []).map((item: any) => {
-        const rawLink = item.link || item.url || "";
+    // Função de busca individual
+    const fetchCategory = async (keyword: string) => {
+      try {
+        // Busca 5 produtos de cada categoria para garantir que pelo menos 1 seja válido e novo
+        const params = new URLSearchParams({ 
+          keyword: keyword,
+          sort: "discount",
+          limit: "5" 
+        });
         
-        // USA A NOVA FUNÇÃO DE EXTRAÇÃO
-        const extracted = extractProductData(item);
+        const res = await fetch(
+          `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
+          { method: "GET", headers: { "x-api-key": apiKey, "Content-Type": "application/json" } }
+        );
+
+        if (!res.ok) return [];
+        const data = await res.json();
         
-        // Se ainda não achou a loja, tenta pelo link
-        const finalStore = extracted.store || getStoreFromLink(rawLink, "Loja Parceira");
+        return (data.data || []).map((item: any) => {
+          const rawLink = item.link || item.url || "";
+          return {
+            id: String(item.id || item.productId || Math.random().toString(36)),
+            name: item.name || item.productName || "Produto Oferta",
+            price: getBestPrice(item),
+            originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
+            discount: item.discount || 0,
+            link: rawLink,
+            image: item.image || item.thumbnail || "",
+            store: item.store?.name || getStoreFromLink(rawLink, "Loja Parceira"),
+            category: item.category?.name || item.categoryName || keyword,
+            originKeyword: keyword, // Marca a categoria de origem para filtragem
+            generatedMessage: "",
+          };
+        });
+      } catch (e) {
+        return [];
+      }
+    };
 
-        return {
-          id: String(item.id || item.productId || Math.random().toString(36)),
-          name: item.name || item.productName || "Produto Oferta",
-          price: extracted.price, // Preço corrigido
-          originalPrice: extracted.originalPrice,
-          discount: item.discount || 0,
-          link: rawLink,
-          image: item.image || item.thumbnail || "",
-          store: finalStore,
-          category: item.category?.name || item.categoryName || randomKeyword,
-          generatedMessage: "",
-        };
-      });
-
-      const validProducts = products.filter(p => p.price > 0.01);
-      
-      console.log(`✅ [Passo 1] Encontrados: ${validProducts.length} produtos válidos (com preço).`);
-      return { success: true, products: validProducts };
-    } catch (error) {
-      console.error("Erro fetch:", error);
-      return { success: false, products: [], error: String(error) };
+    // Executa em lotes de 5 requisições paralelas para não sobrecarregar a API
+    const allProducts: Product[] = [];
+    const BATCH_SIZE = 5;
+    
+    for (let i = 0; i < selectedKeywords.length; i += BATCH_SIZE) {
+        const batch = selectedKeywords.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(batch.map(k => fetchCategory(k)));
+        results.forEach(list => allProducts.push(...list));
     }
+
+    // Filtra produtos sem preço válido logo de cara
+    const validProducts = allProducts.filter(p => p.price > 0.01);
+
+    console.log(`✅ [Passo 1] Total de candidatos encontrados: ${validProducts.length}`);
+    return { success: true, products: validProducts };
   },
 });
 
-// Passo 2: Filtrar
+// Passo 2: Filtrar (SELECIONAR 1 POR CATEGORIA)
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
-  description: "Filters products",
+  description: "Filters products selecting 1 per category",
   inputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
@@ -197,13 +187,15 @@ const filterNewProductsStep = createStep({
     alreadyPostedCount: z.number(),
   }),
   execute: async ({ inputData }) => {
-    console.log("🚀 [Passo 2] Filtrando novos...");
+    console.log("🚀 [Passo 2] Selecionando 1 produto de cada categoria...");
     if (!inputData.success || inputData.products.length === 0) {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
 
     try {
       const productIds = inputData.products.map((p) => p.id);
+      if (productIds.length === 0) return { success: false, newProducts: [], alreadyPostedCount: 0 };
+
       const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
       const result = await pool.query(
         `SELECT lomadee_product_id FROM posted_products WHERE lomadee_product_id IN (${placeholders})`,
@@ -213,12 +205,29 @@ const filterNewProductsStep = createStep({
       const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
       const available = inputData.products.filter((p) => !postedIds.has(p.id));
       
-      // Seleciona até 20 produtos
-      const selected = available.slice(0, 20);
+      const selected: Product[] = [];
+      const usedKeywords = new Set<string>();
 
-      console.log(`✅ [Passo 2] ${selected.length} produtos novos para postar.`);
+      // Algoritmo de Seleção: Pega o primeiro produto disponível de cada categoria (keyword)
+      for (const p of available) {
+        const keyword = p.originKeyword || "geral";
+        
+        // Se ainda não escolhemos um produto desta categoria, escolhe agora
+        if (!usedKeywords.has(keyword)) {
+          selected.push(p);
+          usedKeywords.add(keyword);
+        }
+        
+        // Se já temos 20 produtos (meta atingida), para
+        if (selected.length >= 20) break;
+      }
+
+      console.log(`✅ [Passo 2] ${selected.length} produtos variados prontos para envio.`);
+      console.log(`📊 Mix: ${[...usedKeywords].join(", ")}`);
+      
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
-    } catch {
+    } catch (e) {
+      console.error(e);
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
   },
@@ -237,15 +246,15 @@ const generateCopyStep = createStep({
     enrichedProducts: z.array(ProductSchema),
   }),
   execute: async ({ inputData, mastra }) => {
-    console.log(`🚀 [Passo 3] Criando textos para ${inputData.newProducts.length} produtos...`);
+    console.log(`🚀 [Passo 3] Gerando textos...`);
     if (!inputData.success || inputData.newProducts.length === 0) {
       return { success: true, enrichedProducts: [] };
     }
 
     const agent = mastra?.getAgent("promoPublisherAgent");
     const enrichedProducts = [...inputData.newProducts];
-
     const batchSize = 5;
+    
     for (let i = 0; i < enrichedProducts.length; i += batchSize) {
         const batch = enrichedProducts.slice(i, i + batchSize);
         await Promise.all(batch.map(async (p) => {
@@ -254,8 +263,12 @@ const generateCopyStep = createStep({
                 PRODUTO: ${p.name}
                 PREÇO: ${priceText}
                 LOJA: ${p.store}
-                LINK: ${p.link}
-                Crie legenda Telegram. Curta. Emoji. OBRIGATÓRIO PREÇO: ${priceText}. Final: 👇 Link:
+                
+                Legenda Telegram Curta e Vendedora. 
+                1. Headline com emoji. 
+                2. Benefício. 
+                3. OBRIGATÓRIO PREÇO: ${priceText}
+                4. Finalize com: 👇 Link:
             `;
             try {
                 const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
@@ -270,7 +283,7 @@ const generateCopyStep = createStep({
   },
 });
 
-// Envio
+// Envio e Marcação
 async function sendTelegramMessage(product: Product): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHANNEL_ID;
@@ -281,11 +294,12 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
     let text = product.generatedMessage || "";
 
     if (!text || !text.includes("R$")) {
-      text = `🔥 *OFERTA IMPERDÍVEL*\n\n📦 ${product.name}\n\n💰 *${priceText}*\n\n👇 Link Oficial:`;
+      text = `🔥 *${product.name}*\n\n💰 *${priceText}*\n\n👇 Link Oficial:`;
     }
 
     if (!text.includes(product.link)) text += `\n${product.link}`;
 
+    // FORÇA O ENVIO DE FOTO SE DISPONÍVEL
     const endpoint = product.image ? "sendPhoto" : "sendMessage";
     const body: any = { chat_id: chat, parse_mode: "Markdown" };
 
@@ -301,10 +315,19 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
     });
 
     if (!res.ok) {
+      // Se falhar (ex: imagem inválida ou markdown quebrado), tenta fallback de texto puro
       body.parse_mode = undefined;
-      res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
-      });
+      // Se era foto, tenta mudar para mensagem de texto no fallback
+      if (endpoint === "sendPhoto") {
+          const fallbackBody = { chat_id: chat, text: text };
+          res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fallbackBody)
+          });
+      } else {
+          res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+          });
+      }
     }
 
     return res.ok;
@@ -333,8 +356,8 @@ const publishStep = createStep({
       if (await sendTelegramMessage(p)) {
         await markPosted(p.id);
         count++;
-        console.log(`✅ [${count}] Enviado: ${p.name} - R$ ${p.price}`);
-        await new Promise(r => setTimeout(r, 2500));
+        console.log(`✅ [${count}] Enviado: ${p.category} -> ${p.name}`);
+        await new Promise(r => setTimeout(r, 3000));
       }
     }
     return { success: true, count };
