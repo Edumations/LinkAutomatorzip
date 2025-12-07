@@ -282,17 +282,28 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
     message += `\n🛒 [COMPRAR AGORA](${product.link})\n`;
     message += `\n⚡ _Corre que é por tempo limitado!_`;
 
+    // LÓGICA ADICIONADA: Decidir entre enviar Foto ou Texto
+    const method = product.image ? "sendPhoto" : "sendMessage";
+    
+    const body: any = {
+      chat_id: channelId,
+      parse_mode: "Markdown", // Ou MarkdownV2 se preferir, mas requer escape rigoroso
+      disable_web_page_preview: false,
+    };
+
+    if (product.image) {
+        body.photo = product.image;
+        body.caption = message; // A mensagem vira legenda
+    } else {
+        body.text = message;
+    }
+
     const response = await fetch(
-      `https://api.telegram.org/bot${botToken}/sendMessage`,
+      `https://api.telegram.org/bot${botToken}/${method}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: channelId,
-          text: message,
-          parse_mode: "Markdown",
-          disable_web_page_preview: false,
-        }),
+        body: JSON.stringify(body),
       }
     );
 
@@ -302,7 +313,8 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
       return false;
     }
 
-    logger?.info("✅ Telegram message sent", { messageId: data.result.message_id });
+    // LOG DE SUCESSO QUE VOCÊ PEDIU
+    logger?.info(`✅ Produto enviado: ${product.name}`, { messageId: data.result.message_id });
     return true;
   } catch (error) {
     logger?.error("❌ Telegram error", { error: String(error) });
