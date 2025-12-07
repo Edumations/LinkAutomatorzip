@@ -4,14 +4,27 @@ import pg from "pg";
 
 const { Pool } = pg;
 
+// CORREÇÃO CRÍTICA: Adicionado SSL para funcionar no Render
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false // Necessário para conexões no Render
+  }
 });
 
 async function setupDatabase() {
-  if (!process.env.DATABASE_URL) return;
+  if (!process.env.DATABASE_URL) {
+    console.warn("⚠️ DATABASE_URL não definida. O bot pode falhar ao salvar histórico.");
+    return;
+  }
+  
+  console.log("🛠️ Conectando ao Banco de Dados...");
   try {
-    await pool.query(`
+    // Teste de conexão simples para destravar o processo se falhar
+    const client = await pool.connect();
+    console.log("✅ Conexão com Banco estabelecida!");
+    
+    await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
         lomadee_product_id VARCHAR(255) UNIQUE NOT NULL,
@@ -22,11 +35,14 @@ async function setupDatabase() {
         posted_at TIMESTAMP DEFAULT NOW()
       );
     `);
+    client.release(); // Libera o cliente
+    console.log("✅ Tabela 'posted_products' verificada.");
   } catch (err) {
-    console.error("❌ Erro fatal ao criar tabela:", err);
+    console.error("❌ ERRO FATAL NO BANCO:", err);
   }
 }
 
+// Inicia o banco imediatamente
 setupDatabase();
 
 const ProductSchema = z.object({
@@ -44,33 +60,19 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
-// --- CORREÇÃO DE PREÇO ---
 function safeParseFloat(value: any): number {
   if (typeof value === "number") return value;
   if (!value) return 0;
-  
-  // Converte para string
   let str = String(value);
-  
-  // Se tiver formato brasileiro "1.200,50", remove os pontos de milhar primeiro
-  if (str.includes(",") && str.includes(".")) {
-    str = str.replace(/\./g, ""); // Remove pontos de milhar
-  }
-  
-  // Substitui vírgula decimal por ponto
+  if (str.includes(",") && str.includes(".")) str = str.replace(/\./g, "");
   str = str.replace(",", ".");
-  
-  // Remove qualquer coisa que não seja número ou ponto
   str = str.replace(/[^0-9.]/g, "");
-  
   return parseFloat(str) || 0;
 }
 
-// --- CORREÇÃO DE LOJA ---
 function getStoreFromLink(link: string, fallback: string): string {
   if (!link) return fallback;
   const lower = link.toLowerCase();
-  
   if (lower.includes("amazon")) return "Amazon";
   if (lower.includes("magalu") || lower.includes("magazineluiza")) return "Magalu";
   if (lower.includes("shopee")) return "Shopee";
@@ -80,12 +82,11 @@ function getStoreFromLink(link: string, fallback: string): string {
   if (lower.includes("girafa")) return "Girafa";
   if (lower.includes("fastshop")) return "Fast Shop";
   if (lower.includes("ponto")) return "Ponto Frio";
-  if (lower.includes("extra")) return "Extra";
   if (lower.includes("kabum")) return "KaBuM!";
-  
   return fallback;
 }
 
+// Passo 1: Buscar
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products",
@@ -96,8 +97,12 @@ const fetchProductsStep = createStep({
     error: z.string().optional(),
   }),
   execute: async ({ mastra }) => {
+    console.log("🚀 [Passo 1] Iniciando busca na API...");
     const apiKey = process.env.LOMADEE_API_KEY;
-    if (!apiKey) return { success: false, products: [], error: "Missing Key" };
+    if (!apiKey) {
+      console.error("❌ Erro: LOMADEE_API_KEY faltando");
+      return { success: false, products: [], error: "Missing Key" };
+    }
 
     try {
       const params = new URLSearchParams({ page: "1", limit: "60", sort: "discount" });
@@ -109,19 +114,21 @@ const fetchProductsStep = createStep({
         }
       );
 
-      if (!response.ok) return { success: false, products: [], error: `API Error` };
+      if (!response.ok) {
+        console.error(`❌ Erro API Lomadee: ${response.status}`);
+        return { success: false, products: [], error: `API Error` };
+      }
 
       const data = await response.json();
       
       const products: Product[] = (data.data || []).map((item: any) => {
         const rawLink = item.link || item.url || "";
-        // Tenta pegar da API, se não, tenta adivinhar pelo link
         const storeName = item.store?.name || getStoreFromLink(rawLink, "Loja Parceira");
         
         return {
           id: String(item.id || item.productId || Math.random().toString(36)),
           name: item.name || item.productName || "Produto Oferta",
-          price: safeParseFloat(item.price || item.salePrice), // Usa o parser corrigido
+          price: safeParseFloat(item.price || item.salePrice),
           originalPrice: safeParseFloat(item.originalPrice || item.priceFrom),
           discount: item.discount || 0,
           link: rawLink,
@@ -132,16 +139,18 @@ const fetchProductsStep = createStep({
         };
       });
 
-      // Filtra produtos com preço zero para não enviar erro
       const validProducts = products.filter(p => p.price > 0);
-
+      console.log(`✅ [Passo 1] Encontrados ${validProducts.length} produtos válidos.`);
+      
       return { success: true, products: validProducts };
     } catch (error) {
+      console.error("❌ Erro no fetch:", error);
       return { success: false, products: [], error: String(error) };
     }
   },
 });
 
+// Passo 2: Filtrar
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters products",
@@ -156,6 +165,7 @@ const filterNewProductsStep = createStep({
     alreadyPostedCount: z.number(),
   }),
   execute: async ({ inputData }) => {
+    console.log("🚀 [Passo 2] Filtrando produtos...");
     if (!inputData.success || inputData.products.length === 0) {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
@@ -177,10 +187,7 @@ const filterNewProductsStep = createStep({
 
       for (const p of available) {
         if (selected.length >= MAX) break;
-        // Normaliza nome da loja para comparar
         const sKey = p.store.toLowerCase();
-        
-        // Se a loja não foi usada E não é genérica "loja parceira"
         if (!usedStores.has(sKey) || sKey === "loja parceira") {
           selected.push(p);
           if (sKey !== "loja parceira") usedStores.add(sKey);
@@ -194,14 +201,16 @@ const filterNewProductsStep = createStep({
         }
       }
 
-      console.log(`🔎 [DIVERSIDADE] Lojas: ${selected.map(p => p.store).join(" | ")}`);
+      console.log(`✅ [Passo 2] Lojas Selecionadas: ${selected.map(p => p.store).join(" | ")}`);
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
-    } catch {
+    } catch (err) {
+      console.error("❌ Erro no filtro:", err);
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
   },
 });
 
+// Passo 3: IA
 const generateCopyStep = createStep({
   id: "generate-copy",
   description: "AI Copywriting",
@@ -214,6 +223,7 @@ const generateCopyStep = createStep({
     enrichedProducts: z.array(ProductSchema),
   }),
   execute: async ({ inputData, mastra }) => {
+    console.log("🚀 [Passo 3] Gerando textos com IA...");
     if (!inputData.success || inputData.newProducts.length === 0) {
       return { success: true, enrichedProducts: [] };
     }
@@ -233,17 +243,17 @@ const generateCopyStep = createStep({
         
         Crie uma legenda para Telegram.
         REGRAS:
-        1. Comece com um emoji de fogo ou alerta.
-        2. Texto curto e persuasivo.
-        3. OBRIGATÓRIO CITAR O PREÇO: ${price}
-        4. Finalize com "👇 Toque no link abaixo:"
+        1. Comece com "🔥"
+        2. Seja curto.
+        3. OBRIGATÓRIO escrever o preço: ${price}
+        4. Termine com: 👇 Link Oficial:
       `;
 
       try {
         const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
         p.generatedMessage = result?.text || "";
       } catch (error) {
-        console.error(`Erro IA (falha segura):`, error);
+        console.error("⚠️ Erro IA (usando fallback):", error);
         p.generatedMessage = ""; 
       }
     }
@@ -252,21 +262,23 @@ const generateCopyStep = createStep({
   },
 });
 
+// Envio e Marcação
 async function sendTelegramMessage(product: Product): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHANNEL_ID;
-  if (!token || !chat) return false;
+  if (!token || !chat) {
+    console.error("❌ Telegram Token ou Chat ID faltando!");
+    return false;
+  }
 
   try {
     const price = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
     let text = product.generatedMessage || "";
 
-    // Fallback se a IA falhar ou não puser o preço
     if (!text || !text.includes("R$")) {
       text = `🔥 *OFERTA IMPERDÍVEL*\n\n📦 ${product.name}\n\n💰 *${price}*\n\n👇 Link Oficial:`;
     }
 
-    // Se a IA não colocou o link, adicionamos no final como precaução
     if (!text.includes(product.link)) {
         text += `\n${product.link}`;
     }
@@ -286,14 +298,16 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
     });
 
     if (!res.ok) {
-      body.parse_mode = undefined; // Tenta sem markdown se falhar
+      console.warn("⚠️ Falha Markdown, tentando texto puro...");
+      body.parse_mode = undefined;
       res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
       });
     }
 
     return res.ok;
-  } catch {
+  } catch (err) {
+    console.error("❌ Erro envio Telegram:", err);
     return false;
   }
 }
@@ -301,7 +315,7 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
 async function markPosted(id: string) {
   try {
     await pool.query(`INSERT INTO posted_products (lomadee_product_id, posted_telegram) VALUES ($1, TRUE) ON CONFLICT (lomadee_product_id) DO NOTHING`, [id]);
-  } catch {}
+  } catch (err) { console.error("❌ Erro ao marcar postado:", err); }
 }
 
 const publishStep = createStep({
@@ -310,13 +324,14 @@ const publishStep = createStep({
   inputSchema: z.object({ success: z.boolean(), enrichedProducts: z.array(ProductSchema) }),
   outputSchema: z.object({ success: z.boolean(), count: z.number() }),
   execute: async ({ inputData }) => {
+    console.log("🚀 [Passo 4] Publicando...");
     if (!inputData.success) return { success: true, count: 0 };
     let count = 0;
     for (const p of inputData.enrichedProducts) {
       if (await sendTelegramMessage(p)) {
         await markPosted(p.id);
         count++;
-        console.log(`✅ Postado: ${p.name} - R$ ${p.price}`);
+        console.log(`✅ [SUCESSO] Postado: ${p.name} - R$ ${p.price}`);
         await new Promise(r => setTimeout(r, 2000));
       }
     }
