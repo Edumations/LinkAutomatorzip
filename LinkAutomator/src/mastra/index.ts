@@ -1,4 +1,4 @@
-// src/mastra/index.ts
+// Adicione isso na primeira linha
 globalThis.__MASTRA_TELEMETRY__ = true;
 
 import { Mastra } from "@mastra/core";
@@ -6,16 +6,16 @@ import { PinoLogger } from "@mastra/loggers";
 import { LogLevel, MastraLogger } from "@mastra/core/logger";
 import pino from "pino";
 import { MCPServer } from "@mastra/mcp";
-import cron from "node-cron"; // Agendador interno
+import cron from "node-cron"; // Agendador interno para o Render
 
 import { sharedPostgresStorage } from "./storage";
 import { inngest, inngestServe } from "./inngest";
 
-// Seus agentes e workflows
+// Importar workflows e agentes
 import { promoPublisherAgent } from "./agents/promoPublisherAgent";
 import { promoPublisherWorkflow } from "./workflows/promoPublisherWorkflow";
 
-// Suas ferramentas
+// Importar ferramentas
 import { lomadeeTool } from "./tools/lomadeeTool";
 import { telegramTool } from "./tools/telegramTool";
 import {
@@ -25,12 +25,12 @@ import {
 } from "./tools/productTrackerTool";
 
 // --- DIAGNÓSTICO DE INICIALIZAÇÃO ---
-console.log("=== INICIALIZANDO BOT NO RENDER ===");
+console.log("=== INICIANDO MASTRA NO RENDER ===");
 // O Render define a porta na variável PORT. Se não tiver, usa 5000 (local)
 const RENDER_PORT = parseInt(process.env.PORT || "5000");
 console.log(`📡 Porta configurada: ${RENDER_PORT}`);
 
-// Logger customizado para produção
+// Logger customizado
 class ProductionPinoLogger extends MastraLogger {
   protected logger: pino.Logger;
   constructor(options: { name?: string; level?: LogLevel } = {}) {
@@ -47,6 +47,7 @@ class ProductionPinoLogger extends MastraLogger {
   error(msg: string, args: any = {}) { this.logger.error(args, msg); }
 }
 
+// Inicialização do Mastra
 export const mastra = new Mastra({
   storage: sharedPostgresStorage,
   workflows: { promoPublisherWorkflow },
@@ -66,14 +67,14 @@ export const mastra = new Mastra({
   },
   server: {
     host: "0.0.0.0",
-    port: RENDER_PORT, // <--- AQUI ESTÁ A CORREÇÃO PRINCIPAL
+    port: RENDER_PORT, // <--- CORREÇÃO CRÍTICA PARA O RENDER
     apiRoutes: [
       {
         path: "/api/inngest",
         method: "ALL",
         createHandler: async ({ mastra }) => inngestServe({ mastra, inngest }),
       },
-      // Rota de Health Check para o Render ficar feliz
+      // Rota de Health Check para o Render saber que o bot está vivo
       {
         path: "/",
         method: "GET",
@@ -85,14 +86,13 @@ export const mastra = new Mastra({
 });
 
 // --- SISTEMA DE AGENDAMENTO INTERNO ---
-// Substitui o Inngest Cron para garantir execução no Render
-// Padrão: A cada 1 hora ("0 * * * *") ou conforme variável de ambiente
-const cronExpression = process.env.SCHEDULE_CRON_EXPRESSION || "0 * * * *";
+// Garante que o bot funcione sozinho no Render
+const cronExpression = process.env.SCHEDULE_CRON_EXPRESSION || "0 * * * *"; // Padrão: 1 hora
 
-console.log(`⏰ Agendador iniciado com padrão: "${cronExpression}"`);
+console.log(`⏰ Agendador iniciado: "${cronExpression}"`);
 
 cron.schedule(cronExpression, async () => {
-  console.log("🚀 [CRON] Iniciando ciclo de publicação de ofertas...");
+  console.log("🚀 [CRON] Iniciando ciclo de publicação...");
   try {
     const workflow = mastra.getWorkflow("promoPublisherWorkflow");
     if (workflow) {
@@ -105,7 +105,7 @@ cron.schedule(cronExpression, async () => {
   }
 });
 
-// Disparo de teste na inicialização (após 10s) para você ver o resultado logo
+// Teste inicial rápido (roda 10s após o deploy para você ver funcionando)
 setTimeout(async () => {
   console.log("⚡ [STARTUP] Executando rodada de teste inicial...");
   try {
