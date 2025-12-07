@@ -37,6 +37,7 @@
     "exa-js": "^1.8.17",
     "inngest": "^3.40.2",
     "inngest-cli": "^1.11.5",
+    "node-cron": "^3.0.3",
     "pg": "^8.16.3",
     "pino": "^9.9.4",
     "tsx": "^4.20.3",
@@ -44,11 +45,10 @@
   },
   "devDependencies": {
     "@types/node": "^24.6.2",
+    "@types/node-cron": "^3.0.11",
     "mastra": "^0.14.0",
     "prettier": "^3.6.2",
     "ts-node": "^10.9.1",
     "typescript": "^5.9.3"
   }
 }
-
-npm install node-cron @types/node-cron
