@@ -50,3 +50,5 @@
     "typescript": "^5.9.3"
   }
 }
+
+npm install node-cron @types/node-cron
