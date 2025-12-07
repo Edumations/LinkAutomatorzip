@@ -44,33 +44,48 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
-// Função para limpar preços (Troca vírgula por ponto)
+// --- CORREÇÃO DE PREÇO ---
 function safeParseFloat(value: any): number {
   if (typeof value === "number") return value;
-  if (typeof value === "string") {
-    // Remove "R$", espaços e troca vírgula por ponto
-    const clean = value.replace(/[^\d.,]/g, "").replace(",", ".");
-    return parseFloat(clean) || 0;
+  if (!value) return 0;
+  
+  // Converte para string
+  let str = String(value);
+  
+  // Se tiver formato brasileiro "1.200,50", remove os pontos de milhar primeiro
+  if (str.includes(",") && str.includes(".")) {
+    str = str.replace(/\./g, ""); // Remove pontos de milhar
   }
-  return 0;
+  
+  // Substitui vírgula decimal por ponto
+  str = str.replace(",", ".");
+  
+  // Remove qualquer coisa que não seja número ou ponto
+  str = str.replace(/[^0-9.]/g, "");
+  
+  return parseFloat(str) || 0;
 }
 
-// Função para adivinhar a loja pelo link (se a API falhar)
+// --- CORREÇÃO DE LOJA ---
 function getStoreFromLink(link: string, fallback: string): string {
   if (!link) return fallback;
-  const lowerLink = link.toLowerCase();
-  if (lowerLink.includes("amazon")) return "Amazon";
-  if (lowerLink.includes("magazineluiza") || lowerLink.includes("magalu")) return "Magalu";
-  if (lowerLink.includes("shopee")) return "Shopee";
-  if (lowerLink.includes("mercadolivre")) return "Mercado Livre";
-  if (lowerLink.includes("casasbahia")) return "Casas Bahia";
-  if (lowerLink.includes("americanas")) return "Americanas";
-  if (lowerLink.includes("girafa")) return "Girafa";
-  if (lowerLink.includes("fastshop")) return "Fast Shop";
+  const lower = link.toLowerCase();
+  
+  if (lower.includes("amazon")) return "Amazon";
+  if (lower.includes("magalu") || lower.includes("magazineluiza")) return "Magalu";
+  if (lower.includes("shopee")) return "Shopee";
+  if (lower.includes("mercadolivre")) return "Mercado Livre";
+  if (lower.includes("casasbahia")) return "Casas Bahia";
+  if (lower.includes("americanas")) return "Americanas";
+  if (lower.includes("girafa")) return "Girafa";
+  if (lower.includes("fastshop")) return "Fast Shop";
+  if (lower.includes("ponto")) return "Ponto Frio";
+  if (lower.includes("extra")) return "Extra";
+  if (lower.includes("kabum")) return "KaBuM!";
+  
   return fallback;
 }
 
-// Passo 1: Buscar Produtos
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products",
@@ -85,7 +100,6 @@ const fetchProductsStep = createStep({
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
     try {
-      // Busca 60 produtos para ter variedade
       const params = new URLSearchParams({ page: "1", limit: "60", sort: "discount" });
       const response = await fetch(
         `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
@@ -101,13 +115,13 @@ const fetchProductsStep = createStep({
       
       const products: Product[] = (data.data || []).map((item: any) => {
         const rawLink = item.link || item.url || "";
-        // Tenta pegar nome da loja ou adivinha pelo link
-        const storeName = item.store?.name || item.storeName || getStoreFromLink(rawLink, "Loja Parceira");
+        // Tenta pegar da API, se não, tenta adivinhar pelo link
+        const storeName = item.store?.name || getStoreFromLink(rawLink, "Loja Parceira");
         
         return {
           id: String(item.id || item.productId || Math.random().toString(36)),
           name: item.name || item.productName || "Produto Oferta",
-          price: safeParseFloat(item.price || item.salePrice), // Usa parse seguro
+          price: safeParseFloat(item.price || item.salePrice), // Usa o parser corrigido
           originalPrice: safeParseFloat(item.originalPrice || item.priceFrom),
           discount: item.discount || 0,
           link: rawLink,
@@ -118,14 +132,16 @@ const fetchProductsStep = createStep({
         };
       });
 
-      return { success: products.length > 0, products };
+      // Filtra produtos com preço zero para não enviar erro
+      const validProducts = products.filter(p => p.price > 0);
+
+      return { success: true, products: validProducts };
     } catch (error) {
       return { success: false, products: [], error: String(error) };
     }
   },
 });
 
-// Passo 2: Filtrar com Diversidade
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters products",
@@ -155,21 +171,22 @@ const filterNewProductsStep = createStep({
       const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
       const available = inputData.products.filter((p) => !postedIds.has(p.id));
       
-      // Diversidade Lógica
       const selected: Product[] = [];
       const usedStores = new Set<string>();
       const MAX = 3;
 
       for (const p of available) {
         if (selected.length >= MAX) break;
-        // Se a loja ainda não foi usada nesta rodada, pega o produto
-        if (!usedStores.has(p.store)) {
+        // Normaliza nome da loja para comparar
+        const sKey = p.store.toLowerCase();
+        
+        // Se a loja não foi usada E não é genérica "loja parceira"
+        if (!usedStores.has(sKey) || sKey === "loja parceira") {
           selected.push(p);
-          usedStores.add(p.store);
+          if (sKey !== "loja parceira") usedStores.add(sKey);
         }
       }
 
-      // Se sobrou espaço, preenche com qualquer um
       if (selected.length < MAX) {
         for (const p of available) {
           if (selected.length >= MAX) break;
@@ -177,7 +194,7 @@ const filterNewProductsStep = createStep({
         }
       }
 
-      console.log(`🔎 [DIVERSIDADE] Lojas: ${selected.map(p => p.store).join(", ")}`);
+      console.log(`🔎 [DIVERSIDADE] Lojas: ${selected.map(p => p.store).join(" | ")}`);
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
     } catch {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
@@ -185,7 +202,6 @@ const filterNewProductsStep = createStep({
   },
 });
 
-// Passo 3: Gerar Texto com IA (CORRIGIDO generateLegacy)
 const generateCopyStep = createStep({
   id: "generate-copy",
   description: "AI Copywriting",
@@ -213,22 +229,22 @@ const generateCopyStep = createStep({
         PRODUTO: ${p.name}
         PREÇO: ${price}
         LOJA: ${p.store}
+        LINK: ${p.link}
         
-        Escreva uma legenda de venda para Telegram.
+        Crie uma legenda para Telegram.
         REGRAS:
-        1. Comece com "🔥"
-        2. Seja curto.
-        3. OBRIGATÓRIO escrever o preço: ${price}
-        4. Termine com: 👇 Link Oficial:
+        1. Comece com um emoji de fogo ou alerta.
+        2. Texto curto e persuasivo.
+        3. OBRIGATÓRIO CITAR O PREÇO: ${price}
+        4. Finalize com "👇 Toque no link abaixo:"
       `;
 
       try {
-        // CORREÇÃO CRÍTICA: Usando generateLegacy para compatibilidade
         const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
         p.generatedMessage = result?.text || "";
       } catch (error) {
-        console.error("Erro IA:", error);
-        p.generatedMessage = ""; // Deixa vazio para o fallback preencher
+        console.error(`Erro IA (falha segura):`, error);
+        p.generatedMessage = ""; 
       }
     }
 
@@ -236,7 +252,6 @@ const generateCopyStep = createStep({
   },
 });
 
-// Envio e Marcação
 async function sendTelegramMessage(product: Product): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHANNEL_ID;
@@ -251,7 +266,10 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
       text = `🔥 *OFERTA IMPERDÍVEL*\n\n📦 ${product.name}\n\n💰 *${price}*\n\n👇 Link Oficial:`;
     }
 
-    text += `\n${product.link}`;
+    // Se a IA não colocou o link, adicionamos no final como precaução
+    if (!text.includes(product.link)) {
+        text += `\n${product.link}`;
+    }
 
     const endpoint = product.image ? "sendPhoto" : "sendMessage";
     const body: any = { chat_id: chat, parse_mode: "Markdown" };
@@ -263,14 +281,12 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
       body.text = text;
     }
 
-    // Tenta enviar
     let res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
     });
 
-    // Se falhar por Markdown, tenta texto puro
     if (!res.ok) {
-      body.parse_mode = undefined;
+      body.parse_mode = undefined; // Tenta sem markdown se falhar
       res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
       });
@@ -300,7 +316,7 @@ const publishStep = createStep({
       if (await sendTelegramMessage(p)) {
         await markPosted(p.id);
         count++;
-        console.log(`✅ Postado: ${p.name} (${p.store}) - R$ ${p.price}`);
+        console.log(`✅ Postado: ${p.name} - R$ ${p.price}`);
         await new Promise(r => setTimeout(r, 2000));
       }
     }
