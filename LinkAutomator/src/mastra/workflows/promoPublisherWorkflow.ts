@@ -4,16 +4,14 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-// Configuração do Banco de Dados
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
 
-// Inicialização da Tabela
+// Configuração do Banco de Dados
 async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   
-  console.log("🛠️ Verificando banco de dados...");
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
@@ -26,7 +24,6 @@ async function setupDatabase() {
         posted_at TIMESTAMP DEFAULT NOW()
       );
     `);
-    console.log("✅ Tabela 'posted_products' pronta!");
   } catch (err) {
     console.error("❌ Erro fatal ao criar tabela:", err);
   }
@@ -34,6 +31,7 @@ async function setupDatabase() {
 
 setupDatabase();
 
+// Schema do Produto
 const ProductSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -44,6 +42,8 @@ const ProductSchema = z.object({
   image: z.string().optional(),
   store: z.string().optional(),
   category: z.string().optional(),
+  // Campo novo para guardar o texto gerado pela IA
+  generatedMessage: z.string().optional(), 
 });
 
 type Product = z.infer<typeof ProductSchema>;
@@ -52,40 +52,27 @@ type Product = z.infer<typeof ProductSchema>;
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches promotional products from the Lomadee API",
-
   inputSchema: z.object({}),
-
   outputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
     error: z.string().optional(),
   }),
-
   execute: async ({ mastra }) => {
-    const logger = mastra?.getLogger();
-    logger?.info("🚀 [Step 1] Buscando produtos na Lomadee...");
-
     const apiKey = process.env.LOMADEE_API_KEY;
-
-    if (!apiKey) {
-      return { success: false, products: [], error: "Missing LOMADEE_API_KEY" };
-    }
+    if (!apiKey) return { success: false, products: [], error: "Missing LOMADEE_API_KEY" };
 
     try {
-      const params = new URLSearchParams({ page: "1", limit: "20" });
+      const params = new URLSearchParams({ page: "1", limit: "20", sort: "discount" }); // Ordenar por desconto
       const response = await fetch(
         `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
         {
           method: "GET",
-          headers: {
-            "x-api-key": apiKey,
-            "Content-Type": "application/json",
-          },
+          headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
         }
       );
 
       if (!response.ok) {
-        const errorText = await response.text();
         return { success: false, products: [], error: `API Error: ${response.status}` };
       }
 
@@ -101,14 +88,10 @@ const fetchProductsStep = createStep({
         image: item.image || item.thumbnail || "",
         store: item.store || item.storeName || "",
         category: item.category || "",
+        generatedMessage: "", // Inicializa vazio
       }));
 
-      console.log(`🔎 [API] Retornou ${products.length} produtos.`);
-      
-      return {
-        success: products.length > 0,
-        products,
-      };
+      return { success: products.length > 0, products };
     } catch (error) {
       return { success: false, products: [], error: String(error) };
     }
@@ -119,20 +102,17 @@ const fetchProductsStep = createStep({
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters out products that have already been posted",
-
   inputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
     error: z.string().optional(),
   }),
-
   outputSchema: z.object({
     success: z.boolean(),
     newProducts: z.array(ProductSchema),
     alreadyPostedCount: z.number(),
     error: z.string().optional(),
   }),
-
   execute: async ({ inputData }) => {
     if (!inputData.success || inputData.products.length === 0) {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
@@ -149,17 +129,77 @@ const filterNewProductsStep = createStep({
       );
 
       const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
-      const newProducts = inputData.products.filter((p) => !postedIds.has(p.id));
-      const alreadyPostedCount = inputData.products.length - newProducts.length;
+      
+      // Filtra e pega apenas os TOP 3 produtos novos para não gastar muita IA/Quota de uma vez
+      const newProducts = inputData.products
+        .filter((p) => !postedIds.has(p.id))
+        .slice(0, 3); 
 
-      console.log(`🔎 [FILTRO] Novos: ${newProducts.length} | Repetidos: ${alreadyPostedCount}`);
-
-      return { success: true, newProducts, alreadyPostedCount };
+      return { success: true, newProducts, alreadyPostedCount: result.rowCount || 0 };
     } catch (error) {
-      console.error("Erro no filtro:", error);
-      // Fail-safe: retorna lista vazia em caso de erro no banco
-      return { success: false, newProducts: [], alreadyPostedCount: 0, error: String(error) };
+      console.error("Erro filtro:", error);
+      return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
+  },
+});
+
+// Passo 3: Gerar Texto com IA (NOVO)
+const generateCopyStep = createStep({
+  id: "generate-copy",
+  description: "Uses AI to write persuasive copy for the products",
+  inputSchema: z.object({
+    success: z.boolean(),
+    newProducts: z.array(ProductSchema),
+    alreadyPostedCount: z.number(),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    enrichedProducts: z.array(ProductSchema),
+  }),
+  execute: async ({ inputData, mastra }) => {
+    if (!inputData.success || inputData.newProducts.length === 0) {
+      return { success: true, enrichedProducts: [] };
+    }
+
+    const agent = mastra?.getAgent("promoPublisherAgent");
+    const enrichedProducts = [...inputData.newProducts];
+
+    console.log(`🤖 Gerando textos para ${enrichedProducts.length} produtos...`);
+
+    for (let i = 0; i < enrichedProducts.length; i++) {
+      const product = enrichedProducts[i];
+      const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
+      
+      // Prompt específico para garantir que o preço apareça
+      const prompt = `
+        Crie uma legenda curta e urgente para postar este produto no Telegram.
+        
+        DADOS DO PRODUTO:
+        - Nome: ${product.name}
+        - Loja: ${product.store || "Parceiro"}
+        - Preço OFICIAL: ${priceFormatted} (OBRIGATÓRIO INCLUIR NO TEXTO)
+        - Link: ${product.link}
+        
+        REGRAS:
+        1. Comece com um Headline chamativo (ex: "🔥 BAIXOU!", "🚨 ERRO DE PREÇO?").
+        2. Seja breve e direto (máximo 3 linhas de descrição).
+        3. Use emojis relevantes.
+        4. OBRIGATÓRIO: O preço (${priceFormatted}) deve estar bem visível.
+        5. Finalize com uma chamada para ação (CTA) apontando para o link.
+        6. NÃO coloque o link no texto, apenas indique onde clicar (o link vai num botão ou no final).
+      `;
+
+      try {
+        const result = await agent?.generate(prompt);
+        // Se a geração falhar, usa um fallback simples
+        product.generatedMessage = result?.text || `🔥 Oferta: ${product.name}\n💰 Por apenas: ${priceFormatted}`;
+      } catch (error) {
+        console.error(`Erro IA produto ${product.id}:`, error);
+        product.generatedMessage = `🔥 ${product.name}\n💰 ${priceFormatted}`;
+      }
+    }
+
+    return { success: true, enrichedProducts };
   },
 });
 
@@ -171,35 +211,29 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
   if (!botToken || !channelId) return false;
 
   try {
+    // Se a IA falhou ou veio vazio, garante um texto base com o preço
+    let caption = product.generatedMessage;
     const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
-    
-    let message = "🔥 *OFERTA IMPERDÍVEL!*\n\n";
-    message += `📦 *${product.name}*\n\n`;
-    
-    if (product.store) message += `🏪 Loja: ${product.store}\n`;
-    
-    if (product.originalPrice && product.originalPrice > product.price) {
-      const original = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.originalPrice);
-      message += `💰 De: ~${original}~\n`;
-      message += `🏷️ *Por: ${priceFormatted}*\n`;
-    } else {
-      message += `💰 *Preço: ${priceFormatted}*\n`;
+
+    if (!caption || !caption.includes("R$")) {
+        caption = `🔥 *OFERTA!*\n${product.name}\n\n💰 *${priceFormatted}*\n\n👇 Toque no link abaixo:`;
     }
-    
-    message += `\n🛒 [COMPRAR AGORA](${product.link})\n`;
+
+    // Adiciona o link no final do texto se a IA não tiver colocado (para garantir)
+    caption += `\n\n🛒 [COMPRAR AGORA](${product.link})`;
 
     const endpoint = product.image ? "sendPhoto" : "sendMessage";
     const body: any = {
       chat_id: channelId,
-      parse_mode: "Markdown",
+      parse_mode: "Markdown", // Cuidado com caracteres especiais no texto da IA
       disable_web_page_preview: false
     };
 
     if (product.image) {
       body.photo = product.image;
-      body.caption = message;
+      body.caption = caption;
     } else {
-      body.text = message;
+      body.text = caption;
     }
 
     const response = await fetch(`https://api.telegram.org/bot${botToken}/${endpoint}`, {
@@ -208,7 +242,21 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
       body: JSON.stringify(body)
     });
 
-    return response.ok;
+    const data = await response.json();
+    if (!data.ok) {
+        // Se falhar por Markdown, tenta enviar sem formatação (fallback seguro)
+        console.warn("Falha no Markdown, tentando texto puro...");
+        if (product.image) body.parse_mode = undefined;
+        else { body.parse_mode = undefined; body.text = `${product.name} - ${priceFormatted}\n${product.link}`; }
+        
+        await fetch(`https://api.telegram.org/bot${botToken}/${endpoint}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+    }
+
+    return true;
   } catch (error) {
     console.error("Erro Telegram:", error);
     return false;
@@ -229,16 +277,14 @@ async function markProductAsPosted(product: Product): Promise<void> {
   }
 }
 
-// Passo 3: Publicar
+// Passo 4: Publicar (Agora usando 'enrichedProducts')
 const publishProductsStep = createStep({
   id: "publish-products",
-  description: "Publishes new products to Telegram",
+  description: "Publishes enriched products to Telegram",
 
   inputSchema: z.object({
     success: z.boolean(),
-    newProducts: z.array(ProductSchema),
-    alreadyPostedCount: z.number(),
-    error: z.string().optional(),
+    enrichedProducts: z.array(ProductSchema),
   }),
 
   outputSchema: z.object({
@@ -250,22 +296,19 @@ const publishProductsStep = createStep({
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
     
-    if (!inputData.success || inputData.newProducts.length === 0) {
+    if (!inputData.success || inputData.enrichedProducts.length === 0) {
       return { success: true, publishedCount: 0, summary: "Nenhum produto novo." };
     }
 
     let publishedCount = 0;
-    const maxProducts = Math.min(inputData.newProducts.length, 5);
-
-    for (let i = 0; i < maxProducts; i++) {
-      const product = inputData.newProducts[i];
+    
+    for (const product of inputData.enrichedProducts) {
       const sent = await sendTelegramMessage(product, logger);
       
       if (sent) {
         await markProductAsPosted(product);
         publishedCount++;
         console.log(`✅ Enviado: ${product.name}`);
-        // Delay para evitar spam
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
@@ -289,5 +332,6 @@ export const promoPublisherWorkflow = createWorkflow({
 })
   .then(fetchProductsStep)
   .then(filterNewProductsStep)
+  .then(generateCopyStep) // <--- Novo passo de IA aqui
   .then(publishProductsStep)
   .commit();
