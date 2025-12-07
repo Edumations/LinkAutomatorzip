@@ -44,7 +44,7 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
-// Passo 1: Buscar Produtos (AUMENTADO O LIMITE)
+// Passo 1: Buscar Produtos (Mapeamento Melhorado)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches promotional products from the Lomadee API",
@@ -59,7 +59,6 @@ const fetchProductsStep = createStep({
     if (!apiKey) return { success: false, products: [], error: "Missing LOMADEE_API_KEY" };
 
     try {
-      // AUMENTADO DE 20 PARA 60 para ter mais variedade
       const params = new URLSearchParams({ page: "1", limit: "60", sort: "discount" });
       const response = await fetch(
         `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
@@ -69,24 +68,28 @@ const fetchProductsStep = createStep({
         }
       );
 
-      if (!response.ok) {
-        return { success: false, products: [], error: `API Error: ${response.status}` };
-      }
+      if (!response.ok) return { success: false, products: [], error: `API Error: ${response.status}` };
 
       const data = await response.json();
       
-      const products: Product[] = (data.data || []).map((item: any) => ({
-        id: String(item.id || item.productId || Math.random().toString(36)),
-        name: item.name || item.productName || "Produto sem nome",
-        price: parseFloat(item.price || item.salePrice || 0),
-        originalPrice: parseFloat(item.originalPrice || item.price || 0),
-        discount: item.discount || 0,
-        link: item.link || item.url || "",
-        image: item.image || item.thumbnail || "",
-        store: item.store || item.storeName || "Loja Parceira",
-        category: item.category || item.categoryName || "Geral",
-        generatedMessage: "",
-      }));
+      const products: Product[] = (data.data || []).map((item: any) => {
+        // CORREÇÃO: Tenta pegar o nome da loja em vários lugares possíveis
+        const storeName = item.store?.name || item.storeName || item.advertiser?.name || "Loja Parceira";
+        const categoryName = item.category?.name || item.categoryName || "Geral";
+
+        return {
+          id: String(item.id || item.productId || Math.random().toString(36)),
+          name: item.name || item.productName || "Produto sem nome",
+          price: parseFloat(item.price || item.salePrice || 0),
+          originalPrice: parseFloat(item.originalPrice || item.price || 0),
+          discount: item.discount || 0,
+          link: item.link || item.url || "",
+          image: item.image || item.thumbnail || "",
+          store: storeName,
+          category: categoryName,
+          generatedMessage: "",
+        };
+      });
 
       return { success: products.length > 0, products };
     } catch (error) {
@@ -95,10 +98,10 @@ const fetchProductsStep = createStep({
   },
 });
 
-// Passo 2: Filtrar com DIVERSIDADE
+// Passo 2: Filtrar com Diversidade
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
-  description: "Filters new products prioritizing diversity of stores and categories",
+  description: "Filters new products prioritizing diversity",
   inputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
@@ -126,59 +129,42 @@ const filterNewProductsStep = createStep({
       );
 
       const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
-      
-      // Lista de todos os produtos novos disponíveis
       const availableProducts = inputData.products.filter((p) => !postedIds.has(p.id));
-      const alreadyPostedCount = inputData.products.length - availableProducts.length;
-
-      // --- LÓGICA DE DIVERSIDADE ---
+      
+      // Lógica de Diversidade
       const selectedProducts: Product[] = [];
       const usedStores = new Set<string>();
       const usedCategories = new Set<string>();
       const MAX_SELECTION = 3;
 
-      // 1. Tenta pegar produtos que tenham LOJA E CATEGORIA inéditas nesta rodada
       for (const product of availableProducts) {
         if (selectedProducts.length >= MAX_SELECTION) break;
+        
+        // Normaliza para comparação
+        const sKey = (product.store || "").toLowerCase();
+        const cKey = (product.category || "").toLowerCase();
 
-        const storeKey = product.store || "unknown";
-        const catKey = product.category || "unknown";
-
-        if (!usedStores.has(storeKey) && !usedCategories.has(catKey)) {
+        // Se a loja OU a categoria já apareceram, tenta pular (prioriza variedade total)
+        if (!usedStores.has(sKey) && !usedCategories.has(cKey)) {
           selectedProducts.push(product);
-          usedStores.add(storeKey);
-          usedCategories.add(catKey);
+          usedStores.add(sKey);
+          usedCategories.add(cKey);
         }
       }
 
-      // 2. Se não encheu os 3 slots, relaxa a regra: aceita repetir categoria, mas evita loja
-      if (selectedProducts.length < MAX_SELECTION) {
-        for (const product of availableProducts) {
-          if (selectedProducts.length >= MAX_SELECTION) break;
-          // Se o produto já foi selecionado no passo 1, ignora
-          if (selectedProducts.some(p => p.id === product.id)) continue;
-
-          const storeKey = product.store || "unknown";
-          if (!usedStores.has(storeKey)) {
-             selectedProducts.push(product);
-             usedStores.add(storeKey);
-          }
-        }
-      }
-
-      // 3. Se ainda assim sobrar espaço, preenche com qualquer um que sobrou (para garantir postagens)
+      // Preenchimento (se não achou 3 variados, completa com o que tem)
       if (selectedProducts.length < MAX_SELECTION) {
         for (const product of availableProducts) {
           if (selectedProducts.length >= MAX_SELECTION) break;
           if (!selectedProducts.some(p => p.id === product.id)) {
-             selectedProducts.push(product);
+            selectedProducts.push(product);
           }
         }
       }
 
-      console.log(`🔎 [DIVERSIDADE] Selecionados: ${selectedProducts.map(p => `${p.store} - ${p.category}`).join(" | ")}`);
+      console.log(`🔎 [DIVERSIDADE] Lojas selecionadas: ${selectedProducts.map(p => p.store).join(", ")}`);
 
-      return { success: true, newProducts: selectedProducts, alreadyPostedCount };
+      return { success: true, newProducts: selectedProducts, alreadyPostedCount: result.rowCount || 0 };
     } catch (error) {
       console.error("Erro filtro:", error);
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
@@ -189,7 +175,7 @@ const filterNewProductsStep = createStep({
 // Passo 3: Gerar Texto com IA
 const generateCopyStep = createStep({
   id: "generate-copy",
-  description: "Uses AI to write persuasive copy for the products",
+  description: "Uses AI to write persuasive copy",
   inputSchema: z.object({
     success: z.boolean(),
     newProducts: z.array(ProductSchema),
@@ -207,34 +193,24 @@ const generateCopyStep = createStep({
     const agent = mastra?.getAgent("promoPublisherAgent");
     const enrichedProducts = [...inputData.newProducts];
 
-    console.log(`🤖 Gerando textos para ${enrichedProducts.length} produtos...`);
-
     for (let i = 0; i < enrichedProducts.length; i++) {
       const product = enrichedProducts[i];
       const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
       
       const prompt = `
-        Crie uma legenda curta e urgente para postar este produto no Telegram.
-        
-        DADOS:
-        - Produto: ${product.name}
-        - Loja: ${product.store || "Parceiro"}
-        - Categoria: ${product.category}
-        - Preço: ${priceFormatted} (OBRIGATÓRIO NO TEXTO)
-        - Link: ${product.link}
-        
-        REGRAS:
-        1. Headline com emoji chamativo.
-        2. Fale do benefício principal.
-        3. Exiba o preço (${priceFormatted}) com destaque.
-        4. CTA final.
+        PRODUTO: ${product.name}
+        PREÇO: ${priceFormatted}
+        LOJA: ${product.store}
+        LINK: ${product.link}
+
+        Crie uma legenda para Telegram. OBRIGATÓRIO incluir o preço "${priceFormatted}" no texto.
       `;
 
       try {
         const result = await agent?.generate(prompt);
-        product.generatedMessage = result?.text || `🔥 Oferta: ${product.name}\n💰 ${priceFormatted}`;
+        product.generatedMessage = result?.text || `🔥 ${product.name}\n💰 ${priceFormatted}`;
       } catch (error) {
-        console.error(`Erro IA produto ${product.id}:`, error);
+        console.error(`Erro IA (fallback):`, error);
         product.generatedMessage = `🔥 ${product.name}\n💰 ${priceFormatted}`;
       }
     }
@@ -243,7 +219,6 @@ const generateCopyStep = createStep({
   },
 });
 
-// Funções Auxiliares de Envio
 async function sendTelegramMessage(product: Product, logger: any): Promise<boolean> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const channelId = process.env.TELEGRAM_CHANNEL_ID;
@@ -251,20 +226,27 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
   if (!botToken || !channelId) return false;
 
   try {
-    let caption = product.generatedMessage;
+    let caption = product.generatedMessage || "";
     const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
 
-    if (!caption || !caption.includes("R$")) {
-        caption = `🔥 *OFERTA!*\n${product.name}\n\n💰 *${priceFormatted}*\n\n👇 Link abaixo:`;
+    // Garante que o preço está no texto se a IA falhou
+    if (!caption.includes("R$")) {
+        caption += `\n\n💰 *${priceFormatted}*`;
     }
-
-    caption += `\n\n🛒 [COMPRAR AGORA](${product.link})`;
+    
+    caption += `\n\n👇 Toque abaixo para comprar:`;
 
     const endpoint = product.image ? "sendPhoto" : "sendMessage";
+    
+    // Configura o teclado inline (botão de link)
+    const reply_markup = {
+      inline_keyboard: [[{ text: "🛒 COMPRAR AGORA", url: product.link }]]
+    };
+
     const body: any = {
       chat_id: channelId,
       parse_mode: "Markdown",
-      disable_web_page_preview: false
+      reply_markup: reply_markup
     };
 
     if (product.image) {
@@ -281,16 +263,14 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
     });
 
     const data = await response.json();
-    if (!data.ok) {
-        console.warn("Falha no Markdown, tentando texto puro...");
-        if (product.image) body.parse_mode = undefined;
-        else { body.parse_mode = undefined; body.text = `${product.name} - ${priceFormatted}\n${product.link}`; }
-        
-        await fetch(`https://api.telegram.org/bot${botToken}/${endpoint}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body)
-        });
+    
+    // Retry sem markdown se falhar
+    if (!data.ok && data.description?.includes("can't parse")) {
+       console.warn("Markdown falhou, reenviando texto puro...");
+       body.parse_mode = undefined;
+       await fetch(`https://api.telegram.org/bot${botToken}/${endpoint}`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+       });
     }
 
     return true;
@@ -314,10 +294,9 @@ async function markProductAsPosted(product: Product): Promise<void> {
   }
 }
 
-// Passo 4: Publicar
 const publishProductsStep = createStep({
   id: "publish-products",
-  description: "Publishes enriched products to Telegram",
+  description: "Publishes enriched products",
   inputSchema: z.object({
     success: z.boolean(),
     enrichedProducts: z.array(ProductSchema),
@@ -331,7 +310,7 @@ const publishProductsStep = createStep({
     const logger = mastra?.getLogger();
     
     if (!inputData.success || inputData.enrichedProducts.length === 0) {
-      return { success: true, publishedCount: 0, summary: "Nenhum produto novo." };
+      return { success: true, publishedCount: 0, summary: "Nenhum." };
     }
 
     let publishedCount = 0;
@@ -341,7 +320,7 @@ const publishProductsStep = createStep({
       if (sent) {
         await markProductAsPosted(product);
         publishedCount++;
-        console.log(`✅ Enviado: ${product.name} (${product.store})`);
+        console.log(`✅ Enviado: ${product.name} | Loja: ${product.store}`);
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
@@ -349,7 +328,7 @@ const publishProductsStep = createStep({
     return {
       success: true,
       publishedCount,
-      summary: `Publicados ${publishedCount} produtos variados.`,
+      summary: `Publicados ${publishedCount}.`,
     };
   },
 });
