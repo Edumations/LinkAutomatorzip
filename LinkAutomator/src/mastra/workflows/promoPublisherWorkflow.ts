@@ -175,4 +175,209 @@ const fetchProductsStep = createStep({
       }));
 
       // Junta os produtos específicos com os gerais
-      validProducts = [...validProducts, ...generalProducts.filter((p: Product) => p.price > 0
+      validProducts = [...validProducts, ...generalProducts.filter((p: Product) => p.price > 0.01)];
+    }
+
+    // Remove duplicatas por ID
+    const uniqueProducts = Array.from(new Map(validProducts.map(item => [item.id, item])).values());
+
+    console.log(`✅ [Passo 1] Total Final: ${uniqueProducts.length} produtos prontos.`);
+    return { success: true, products: uniqueProducts };
+  },
+});
+
+// Passo 2: Filtrar
+const filterNewProductsStep = createStep({
+  id: "filter-new-products",
+  description: "Filters products",
+  inputSchema: z.object({
+    success: z.boolean(),
+    products: z.array(ProductSchema),
+    error: z.string().optional(),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    newProducts: z.array(ProductSchema),
+    alreadyPostedCount: z.number(),
+  }),
+  execute: async ({ inputData }) => {
+    console.log("🚀 [Passo 2] Filtrando...");
+    if (!inputData.success || inputData.products.length === 0) {
+      return { success: false, newProducts: [], alreadyPostedCount: 0 };
+    }
+
+    try {
+      const productIds = inputData.products.map((p) => p.id);
+      const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
+      const result = await pool.query(
+        `SELECT lomadee_product_id FROM posted_products WHERE lomadee_product_id IN (${placeholders})`,
+        productIds
+      );
+
+      const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
+      const available = inputData.products.filter((p) => !postedIds.has(p.id));
+      
+      const selected: Product[] = [];
+      const usedKeywords = new Set<string>();
+      
+      // ALGORITMO HÍBRIDO:
+      // 1. Prioridade para diversidade de Keywords
+      for (const p of available) {
+        if (selected.length >= 20) break;
+        const key = p.originKeyword || "geral";
+        if (!usedKeywords.has(key) && key !== "Geral") {
+          selected.push(p);
+          usedKeywords.add(key);
+        }
+      }
+
+      // 2. Completa com qualquer coisa (inclusive Geral) até dar 20
+      if (selected.length < 20) {
+        for (const p of available) {
+          if (selected.length >= 20) break;
+          if (!selected.some(s => s.id === p.id)) selected.push(p);
+        }
+      }
+
+      console.log(`✅ [Passo 2] ${selected.length} produtos novos selecionados.`);
+      return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
+    } catch {
+      return { success: false, newProducts: [], alreadyPostedCount: 0 };
+    }
+  },
+});
+
+// Passo 3: IA
+const generateCopyStep = createStep({
+  id: "generate-copy",
+  description: "AI Copywriting",
+  inputSchema: z.object({
+    success: z.boolean(),
+    newProducts: z.array(ProductSchema),
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    enrichedProducts: z.array(ProductSchema),
+  }),
+  execute: async ({ inputData, mastra }) => {
+    console.log(`🚀 [Passo 3] Gerando textos...`);
+    if (!inputData.success || inputData.newProducts.length === 0) {
+      return { success: true, enrichedProducts: [] };
+    }
+
+    const agent = mastra?.getAgent("promoPublisherAgent");
+    const enrichedProducts = [...inputData.newProducts];
+
+    const batchSize = 5;
+    for (let i = 0; i < enrichedProducts.length; i += batchSize) {
+        const batch = enrichedProducts.slice(i, i + batchSize);
+        await Promise.all(batch.map(async (p) => {
+            const priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
+            const prompt = `
+                PRODUTO: ${p.name}
+                PREÇO: ${priceText}
+                LOJA: ${p.store}
+                LINK: ${p.link}
+                Legenda Telegram Curta. Emoji. OBRIGATÓRIO PREÇO: ${priceText}. Final: 👇 Link:
+            `;
+            try {
+                const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
+                p.generatedMessage = result?.text || "";
+            } catch (error) {
+                p.generatedMessage = ""; 
+            }
+        }));
+    }
+
+    return { success: true, enrichedProducts };
+  },
+});
+
+// Envio
+async function sendTelegramMessage(product: Product): Promise<boolean> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chat = process.env.TELEGRAM_CHANNEL_ID;
+  if (!token || !chat) return false;
+
+  try {
+    const priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
+    let text = product.generatedMessage || "";
+
+    if (!text || !text.includes("R$")) {
+      text = `🔥 *${product.name}*\n\n💰 *${priceText}*\n\n👇 Link Oficial:`;
+    }
+    if (!text.includes(product.link)) text += `\n${product.link}`;
+
+    const endpoint = product.image ? "sendPhoto" : "sendMessage";
+    const body: any = { chat_id: chat, parse_mode: "Markdown" };
+
+    if (product.image) {
+      body.photo = product.image;
+      body.caption = text;
+    } else {
+      body.text = text;
+    }
+
+    let res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      body.parse_mode = undefined;
+      // Retry texto se foto falhar
+      if (endpoint === "sendPhoto") {
+          const fallbackBody = { chat_id: chat, text: text };
+          res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fallbackBody)
+          });
+      } else {
+          res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+          });
+      }
+    }
+
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function markPosted(id: string) {
+  try {
+    await pool.query(`INSERT INTO posted_products (lomadee_product_id, posted_telegram) VALUES ($1, TRUE) ON CONFLICT (lomadee_product_id) DO NOTHING`, [id]);
+  } catch {}
+}
+
+const publishStep = createStep({
+  id: "publish",
+  description: "Publish",
+  inputSchema: z.object({ success: z.boolean(), enrichedProducts: z.array(ProductSchema) }),
+  outputSchema: z.object({ success: z.boolean(), count: z.number() }),
+  execute: async ({ inputData }) => {
+    console.log("🚀 [Passo 4] Publicando...");
+    if (!inputData.success) return { success: true, count: 0 };
+    let count = 0;
+    
+    for (const p of inputData.enrichedProducts) {
+      if (await sendTelegramMessage(p)) {
+        await markPosted(p.id);
+        count++;
+        console.log(`✅ [${count}] Enviado: ${p.category} -> ${p.name}`);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+    return { success: true, count };
+  }
+});
+
+export const promoPublisherWorkflow = createWorkflow({
+  id: "promo-workflow",
+  inputSchema: z.object({}),
+  outputSchema: z.object({ success: z.boolean(), count: z.number() }),
+})
+  .then(fetchProductsStep)
+  .then(filterNewProductsStep)
+  .then(generateCopyStep)
+  .then(publishStep)
+  .commit();
