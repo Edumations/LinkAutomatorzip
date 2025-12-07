@@ -6,9 +6,7 @@ const { Pool } = pg;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
 async function setupDatabase() {
@@ -71,14 +69,11 @@ function getStoreFromLink(link: string, fallback: string): string {
   if (lower.includes("americanas")) return "Americanas";
   if (lower.includes("girafa")) return "Girafa";
   if (lower.includes("fastshop")) return "Fast Shop";
-  if (lower.includes("ponto")) return "Ponto Frio";
-  if (lower.includes("extra")) return "Extra";
-  if (lower.includes("kabum")) return "KaBuM!";
-  
+  if (lower.includes("friopecas") || lower.includes("frio peças")) return "FrioPeças";
   return fallback;
 }
 
-// Passo 1: Buscar (AUMENTADO PARA 80 PRODUTOS)
+// Passo 1: Buscar Produtos (PÁGINA ALEATÓRIA + 100 ITENS)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products",
@@ -89,13 +84,20 @@ const fetchProductsStep = createStep({
     error: z.string().optional(),
   }),
   execute: async ({ mastra }) => {
-    console.log("🚀 [Passo 1] Buscando produtos...");
     const apiKey = process.env.LOMADEE_API_KEY;
     if (!apiKey) return { success: false, products: [], error: "Missing Key" };
 
     try {
-      // Busca 80 produtos para ter margem para filtrar 20 bons
-      const params = new URLSearchParams({ page: "1", limit: "80", sort: "discount" });
+      // MUDANÇA: Página aleatória entre 1 e 5 para evitar pegar sempre as mesmas ofertas
+      const randomPage = Math.floor(Math.random() * 5) + 1;
+      console.log(`🚀 [Passo 1] Buscando na Lomadee (Página ${randomPage})...`);
+
+      const params = new URLSearchParams({ 
+        page: String(randomPage), 
+        limit: "100", // Pega bastante para poder filtrar
+        sort: "rating" // MUDANÇA: 'rating' ou sem sort costuma ter dados mais limpos que 'discount'
+      });
+
       const response = await fetch(
         `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
         {
@@ -111,12 +113,14 @@ const fetchProductsStep = createStep({
       const products: Product[] = (data.data || []).map((item: any) => {
         const rawLink = item.link || item.url || "";
         const storeName = item.store?.name || getStoreFromLink(rawLink, "Loja Parceira");
-        const rawPrice = item.price || item.salePrice || item.priceMin || item.priceMax || 0;
         
+        // Tenta vários campos de preço
+        const price = safeParseFloat(item.price || item.salePrice || item.priceMin || item.priceMax);
+
         return {
           id: String(item.id || item.productId || Math.random().toString(36)),
           name: item.name || item.productName || "Produto Oferta",
-          price: safeParseFloat(rawPrice),
+          price: price,
           originalPrice: safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax),
           discount: item.discount || 0,
           link: rawLink,
@@ -127,8 +131,10 @@ const fetchProductsStep = createStep({
         };
       });
 
-      const validProducts = products.filter(p => p.price > 0);
-      console.log(`✅ [Passo 1] ${validProducts.length} produtos válidos encontrados.`);
+      // MUDANÇA: Filtra RIGOROSAMENTE produtos sem preço.
+      const validProducts = products.filter(p => p.price > 0.01);
+      
+      console.log(`✅ [Passo 1] ${validProducts.length} produtos válidos (com preço > 0).`);
       return { success: true, products: validProducts };
     } catch (error) {
       return { success: false, products: [], error: String(error) };
@@ -136,7 +142,7 @@ const fetchProductsStep = createStep({
   },
 });
 
-// Passo 2: Filtrar (AUMENTADO LIMITE PARA 20)
+// Passo 2: Filtrar com Diversidade (LIMITE POR LOJA)
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters products",
@@ -151,7 +157,7 @@ const filterNewProductsStep = createStep({
     alreadyPostedCount: z.number(),
   }),
   execute: async ({ inputData }) => {
-    console.log("🚀 [Passo 2] Filtrando produtos...");
+    console.log("🚀 [Passo 2] Filtrando diversidade...");
     if (!inputData.success || inputData.products.length === 0) {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
     }
@@ -165,31 +171,39 @@ const filterNewProductsStep = createStep({
       );
 
       const postedIds = new Set(result.rows.map((row: any) => row.lomadee_product_id));
-      const available = inputData.products.filter((p) => !postedIds.has(p.id));
+      // Filtra já postados E SEM PREÇO (segurança dupla)
+      const available = inputData.products.filter((p) => !postedIds.has(p.id) && p.price > 0);
       
       const selected: Product[] = [];
-      const usedStores = new Set<string>();
-      const MAX = 20; // <--- ALTERADO PARA 20
+      const storeCounts: Record<string, number> = {}; // Contador por loja
+      const MAX_TOTAL = 20;
+      const MAX_PER_STORE = 2; // MUDANÇA: Máximo 2 produtos da MESMA loja por vez
 
-      // Prioridade 1: Lojas inéditas na rodada
       for (const p of available) {
-        if (selected.length >= MAX) break;
-        const sKey = p.store.toLowerCase();
-        if (!usedStores.has(sKey) || sKey === "loja parceira") {
+        if (selected.length >= MAX_TOTAL) break;
+        
+        const sKey = (p.store || "outros").toLowerCase();
+        const currentCount = storeCounts[sKey] || 0;
+
+        // Só adiciona se a loja ainda não atingiu o limite
+        if (currentCount < MAX_PER_STORE) {
           selected.push(p);
-          if (sKey !== "loja parceira") usedStores.add(sKey);
+          storeCounts[sKey] = currentCount + 1;
         }
       }
 
-      // Prioridade 2: Preencher com o que sobrou até 20
-      if (selected.length < MAX) {
-        for (const p of available) {
-          if (selected.length >= MAX) break;
-          if (!selected.some(s => s.id === p.id)) selected.push(p);
-        }
+      // Se não encheu os 20 apenas com lojas variadas, libera o limite para preencher
+      if (selected.length < 5) { // Se tiver muito pouco
+         console.log("⚠️ Pouca variedade, liberando repetições...");
+         for (const p of available) {
+            if (selected.length >= MAX_TOTAL) break;
+            if (!selected.some(s => s.id === p.id)) selected.push(p);
+         }
       }
 
-      console.log(`✅ [Passo 2] Selecionados para postar: ${selected.length}`);
+      console.log(`✅ [Passo 2] Selecionados: ${selected.length}`);
+      console.log(`🏪 Lojas: ${[...new Set(selected.map(p => p.store))].join(", ")}`);
+      
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
     } catch {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
@@ -210,7 +224,7 @@ const generateCopyStep = createStep({
     enrichedProducts: z.array(ProductSchema),
   }),
   execute: async ({ inputData, mastra }) => {
-    console.log(`🚀 [Passo 3] Gerando textos para ${inputData.newProducts.length} itens...`);
+    console.log("🚀 [Passo 3] Criando textos...");
     if (!inputData.success || inputData.newProducts.length === 0) {
       return { success: true, enrichedProducts: [] };
     }
@@ -218,9 +232,10 @@ const generateCopyStep = createStep({
     const agent = mastra?.getAgent("promoPublisherAgent");
     const enrichedProducts = [...inputData.newProducts];
 
-    // Processa em paralelo para ser mais rápido
-    await Promise.all(enrichedProducts.map(async (p) => {
-      let priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
+    // Processa um por um para não estourar rate limit da IA se tiver
+    for (let i = 0; i < enrichedProducts.length; i++) {
+      const p = enrichedProducts[i];
+      const priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
       
       const prompt = `
         PRODUTO: ${p.name}
@@ -229,38 +244,41 @@ const generateCopyStep = createStep({
         LINK: ${p.link}
         
         Crie uma legenda para Telegram.
-        1. Use emoji.
-        2. Texto curto.
-        3. OBRIGATÓRIO: ${priceText}
-        4. Finalize com chamada para o link.
+        1. Headline curta com Emoji.
+        2. Fale do produto em 1 frase.
+        3. OBRIGATÓRIO: "${priceText}"
+        4. Finalize: 👇 Link Oficial:
       `;
 
       try {
         const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
         p.generatedMessage = result?.text || "";
       } catch (error) {
+        // Silencioso para não poluir log, usa fallback
         p.generatedMessage = ""; 
       }
-    }));
+    }
 
     return { success: true, enrichedProducts };
   },
 });
 
-// Envio
+// Envio e Marcação
 async function sendTelegramMessage(product: Product): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chat = process.env.TELEGRAM_CHANNEL_ID;
   if (!token || !chat) return false;
 
   try {
-    let priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
+    const priceText = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.price);
     let text = product.generatedMessage || "";
 
+    // Fallback se a IA falhar OU se a IA esqueceu o preço
     if (!text || !text.includes("R$")) {
       text = `🔥 *OFERTA IMPERDÍVEL*\n\n📦 ${product.name}\n\n💰 *${priceText}*\n\n👇 Link Oficial:`;
     }
 
+    // Garante que o link está na mensagem
     if (!text.includes(product.link)) text += `\n${product.link}`;
 
     const endpoint = product.image ? "sendPhoto" : "sendMessage";
@@ -306,14 +324,12 @@ const publishStep = createStep({
     if (!inputData.success) return { success: true, count: 0 };
     let count = 0;
     
-    // Publica com delay reduzido para não demorar demais com 20 itens
     for (const p of inputData.enrichedProducts) {
       if (await sendTelegramMessage(p)) {
         await markPosted(p.id);
         count++;
-        console.log(`✅ [${count}/20] Enviado: ${p.name}`);
-        // 2 segundos de delay entre posts
-        await new Promise(r => setTimeout(r, 2000));
+        console.log(`✅ [${count}] Enviado: ${p.name} (${p.store}) - R$ ${p.price}`);
+        await new Promise(r => setTimeout(r, 3000)); // 3s delay
       }
     }
     return { success: true, count };
