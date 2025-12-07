@@ -1,4 +1,5 @@
-import { createStep, createWorkflow } from "../inngest";
+// MUDANÇA CRÍTICA: Importamos do core, não da pasta ../inngest
+import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import pg from "pg";
 
@@ -7,9 +8,9 @@ const { Pool } = pg;
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
 });
-// 👇 --- COLE ESTE BLOCO LOGO ABAIXO DO 'const pool' --- 👇
+
+// Configuração da Tabela (Mantida)
 async function setupDatabase() {
-  // Só roda se tiver URL do banco configurada
   if (!process.env.DATABASE_URL) return;
   
   console.log("🛠️ Verificando banco de dados...");
@@ -31,9 +32,8 @@ async function setupDatabase() {
   }
 }
 
-// Executa a criação assim que este arquivo for carregado
 setupDatabase();
-// 👆 --------------------------------------------------- 👆
+
 const ProductSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -48,6 +48,7 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
+// Passo 1: Buscar Produtos
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches promotional products from the Lomadee API",
@@ -81,8 +82,6 @@ const fetchProductsStep = createStep({
         limit: "20",
       });
 
-      logger?.info("📡 [Step 1] Calling Lomadee API...");
-
       const response = await fetch(
         `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
         {
@@ -96,10 +95,6 @@ const fetchProductsStep = createStep({
 
       if (!response.ok) {
         const errorText = await response.text();
-        logger?.error("❌ [Step 1] Lomadee API error", {
-          status: response.status,
-          error: errorText,
-        });
         return {
           success: false,
           products: [],
@@ -108,11 +103,7 @@ const fetchProductsStep = createStep({
       }
 
       const data = await response.json();
-      logger?.info("📦 [Step 1] Raw API response received", {
-        dataKeys: Object.keys(data),
-        hasData: !!data.data,
-      });
-
+      
       const products: Product[] = (data.data || []).map((item: any) => ({
         id: String(item.id || item.productId || Math.random().toString(36)),
         name: item.name || item.title || item.productName || "Produto sem nome",
@@ -124,19 +115,12 @@ const fetchProductsStep = createStep({
         store: item.store || item.storeName || item.advertiser || "",
         category: item.category || item.categoryName || "",
       }));
-// --- ADICIONE ESTE BLOCO AQUI ---
-      console.log("========================================");
-      console.log(`🔎 [DIAGNÓSTICO CAUSA 1] A API retornou: ${products.length} produtos.`);
-      if (products.length > 0) {
-          console.log(`   Exemplo do 1º produto: ${products[0].name} - R$ ${products[0].price}`);
-      } else {
-          console.log("   ⚠️ A lista veio vazia da Lomadee!");
-      }
-      console.log("========================================");
-      // --------------------------------
-      
-      logger?.info("✅ [Step 1] Products fetched", { count: products.length });
 
+      // Logs de diagnóstico
+      console.log("========================================");
+      console.log(`🔎 [DIAGNÓSTICO] A API retornou: ${products.length} produtos.`);
+      console.log("========================================");
+      
       return {
         success: products.length > 0,
         products,
@@ -144,8 +128,6 @@ const fetchProductsStep = createStep({
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      logger?.error("❌ [Step 1] Exception", { error: errorMessage });
-
       return {
         success: false,
         products: [],
@@ -155,6 +137,7 @@ const fetchProductsStep = createStep({
   },
 });
 
+// Passo 2: Filtrar Produtos
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters out products that have already been posted",
@@ -174,12 +157,8 @@ const filterNewProductsStep = createStep({
 
   execute: async ({ inputData, mastra }) => {
     const logger = mastra?.getLogger();
-    logger?.info("🔍 [Step 2] Filtering new products...", {
-      totalProducts: inputData.products.length,
-    });
-
+    
     if (!inputData.success || inputData.products.length === 0) {
-      logger?.info("⚠️ [Step 2] No products to filter");
       return {
         success: false,
         newProducts: [],
@@ -190,6 +169,12 @@ const filterNewProductsStep = createStep({
 
     try {
       const productIds = inputData.products.map((p) => p.id);
+      
+      // Se não houver produtos para verificar, retorna vazio
+      if (productIds.length === 0) {
+         return { success: true, newProducts: [], alreadyPostedCount: 0 };
+      }
+
       const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
 
       const result = await pool.query(
@@ -204,19 +189,7 @@ const filterNewProductsStep = createStep({
       const newProducts = inputData.products.filter((p) => !postedIds.has(p.id));
       const alreadyPostedCount = inputData.products.length - newProducts.length;
 
-      // --- ADICIONE ESTE BLOCO AQUI ---
-      console.log("========================================");
-      console.log(`🔎 [DIAGNÓSTICO FILTRO] Dos produtos encontrados:`);
-      console.log(`   - Já postados antes: ${alreadyPostedCount}`);
-      console.log(`   - Novos para postar agora: ${newProducts.length}`);
-      console.log("========================================");
-      // --------------------------------
-
-
-      logger?.info("✅ [Step 2] Filtering complete", {
-        newCount: newProducts.length,
-        alreadyPostedCount,
-      });
+      console.log(`🔎 [FILTRO] Novos: ${newProducts.length} | Já postados: ${alreadyPostedCount}`);
 
       return {
         success: true,
@@ -224,9 +197,8 @@ const filterNewProductsStep = createStep({
         alreadyPostedCount,
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger?.error("❌ [Step 2] Error filtering products", { error: errorMessage });
-
+      logger?.error("❌ [Step 2] Error filtering products", { error: String(error) });
+      // Em caso de erro no banco, tenta enviar tudo (fail-open) ou nada
       return {
         success: true,
         newProducts: inputData.products,
@@ -237,6 +209,9 @@ const filterNewProductsStep = createStep({
 });
 
 function escapeMarkdown(text: string): string {
+  // Escapa caracteres reservados do MarkdownV2 se necessário, 
+  // mas aqui estamos usando Markdown simples ou HTML é mais seguro.
+  // Para Markdown "clássico", chars como * e _ precisam de atenção.
   return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, "\\$&");
 }
 
@@ -245,7 +220,7 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
   const channelId = process.env.TELEGRAM_CHANNEL_ID;
 
   if (!botToken || !channelId) {
-    logger?.warn("⚠️ Telegram not configured - skipping");
+    logger?.warn("⚠️ Telegram not configured");
     return false;
   }
 
@@ -255,51 +230,38 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
       currency: "BRL",
     }).format(product.price);
 
-    const originalPriceFormatted = product.originalPrice
-      ? new Intl.NumberFormat("pt-BR", {
-          style: "currency",
-          currency: "BRL",
-        }).format(product.originalPrice)
-      : null;
-
     let message = `🔥 *OFERTA IMPERDÍVEL!*\n\n`;
-    message += `📦 *${escapeMarkdown(product.name)}*\n\n`;
+    message += `📦 *${product.name}*\n\n`; // Removido escapeMarkdown temporariamente para evitar double-escaping se não usar V2
 
-    if (product.store) {
-      message += `🏪 Loja: ${escapeMarkdown(product.store)}\n`;
-    }
+    if (product.store) message += `🏪 Loja: ${product.store}\n`;
 
     if (product.originalPrice && product.originalPrice > product.price) {
-      message += `💰 De: ~${originalPriceFormatted}~\n`;
+      const original = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(product.originalPrice);
+      message += `💰 De: ~${original}~\n`;
       message += `🏷️ *Por: ${priceFormatted}*\n`;
-      if (product.discount && product.discount > 0) {
-        message += `📉 Desconto: *${product.discount}% OFF*\n`;
-      }
     } else {
       message += `💰 *Preço: ${priceFormatted}*\n`;
     }
 
     message += `\n🛒 [COMPRAR AGORA](${product.link})\n`;
-    message += `\n⚡ _Corre que é por tempo limitado!_`;
 
-    // LÓGICA ADICIONADA: Decidir entre enviar Foto ou Texto
-    const method = product.image ? "sendPhoto" : "sendMessage";
-    
+    // Envio com foto ou texto
+    const endpoint = product.image ? "sendPhoto" : "sendMessage";
     const body: any = {
       chat_id: channelId,
-      parse_mode: "Markdown", // Ou MarkdownV2 se preferir, mas requer escape rigoroso
+      parse_mode: "Markdown",
       disable_web_page_preview: false,
     };
 
     if (product.image) {
-        body.photo = product.image;
-        body.caption = message; // A mensagem vira legenda
+      body.photo = product.image;
+      body.caption = message;
     } else {
-        body.text = message;
+      body.text = message;
     }
 
     const response = await fetch(
-      `https://api.telegram.org/bot${botToken}/${method}`,
+      `https://api.telegram.org/bot${botToken}/${endpoint}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -309,15 +271,12 @@ async function sendTelegramMessage(product: Product, logger: any): Promise<boole
 
     const data = await response.json();
     if (!data.ok) {
-      logger?.error("❌ Telegram API error", { error: data.description });
+      console.error(`❌ Erro Telegram: ${data.description}`);
       return false;
     }
-
-    // LOG DE SUCESSO QUE VOCÊ PEDIU
-    logger?.info(`✅ Produto enviado: ${product.name}`, { messageId: data.result.message_id });
     return true;
   } catch (error) {
-    logger?.error("❌ Telegram error", { error: String(error) });
+    console.error("❌ Exceção Telegram:", error);
     return false;
   }
 }
@@ -327,132 +286,4 @@ async function markProductAsPosted(product: Product, logger: any): Promise<void>
     await pool.query(
       `INSERT INTO posted_products 
        (lomadee_product_id, product_name, product_link, product_price, posted_telegram, posted_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (lomadee_product_id) 
-       DO UPDATE SET 
-         posted_telegram = TRUE,
-         posted_at = NOW()`,
-      [product.id, product.name, product.link, product.price, true]
-    );
-    logger?.info("✅ Product marked as posted", { productId: product.id });
-  } catch (error) {
-    logger?.error("❌ Error marking product as posted", { error: String(error) });
-  }
-}
-
-const publishProductsStep = createStep({
-  id: "publish-products",
-  description: "Publishes new products to Telegram",
-
-  inputSchema: z.object({
-    success: z.boolean(),
-    newProducts: z.array(ProductSchema),
-    alreadyPostedCount: z.number(),
-    error: z.string().optional(),
-  }),
-
-  outputSchema: z.object({
-    success: z.boolean(),
-    publishedCount: z.number(),
-    telegramCount: z.number(),
-    errors: z.array(z.string()),
-    summary: z.string(),
-  }),
-
-  execute: async ({ inputData, mastra }) => {
-    const logger = mastra?.getLogger();
-    logger?.info("📤 [Step 3] Publishing products to Telegram...", {
-      productsToPublish: inputData.newProducts.length,
-    });
-
-    if (!inputData.success || inputData.newProducts.length === 0) {
-      logger?.info("⚠️ [Step 3] No new products to publish");
-      return {
-        success: true,
-        publishedCount: 0,
-        telegramCount: 0,
-        errors: [],
-        summary: "Nenhum produto novo para publicar",
-      };
-    }
-
-    const results = {
-      publishedCount: 0,
-      telegramCount: 0,
-      errors: [] as string[],
-    };
-
-    const maxProducts = Math.min(inputData.newProducts.length, 5);
-
-    for (let i = 0; i < maxProducts; i++) {
-      const product = inputData.newProducts[i];
-      logger?.info(`📦 [Step 3] Publishing product ${i + 1}/${maxProducts}`, {
-        productId: product.id,
-        productName: product.name,
-      });
-
-      try {
-        const telegramSuccess = await sendTelegramMessage(product, logger);
-
-        if (telegramSuccess) {
-          results.telegramCount++;
-          results.publishedCount++;
-          await markProductAsPosted(product, logger);
-        }
-
-        logger?.info(`✅ [Step 3] Product ${i + 1} processed`, {
-          productId: product.id,
-          telegram: telegramSuccess,
-        });
-
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        logger?.error(`❌ [Step 3] Error publishing product ${i + 1}`, {
-          productId: product.id,
-          error: errorMessage,
-        });
-        results.errors.push(`Produto ${product.id}: ${errorMessage}`);
-      }
-    }
-
-    const summary = `
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📊 RESUMO DA PUBLICAÇÃO
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📦 Produtos processados: ${maxProducts}
-✅ Produtos publicados: ${results.publishedCount}
-📱 Telegram: ${results.telegramCount}
-⚠️ Erros: ${results.errors.length}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-`;
-
-    logger?.info(summary);
-
-    return {
-      success: true,
-      ...results,
-      summary,
-    };
-  },
-});
-
-export const promoPublisherWorkflow = createWorkflow({
-  id: "promo-publisher-workflow",
-
-  inputSchema: z.object({}) as any,
-
-  outputSchema: z.object({
-    success: z.boolean(),
-    publishedCount: z.number(),
-    telegramCount: z.number(),
-    errors: z.array(z.string()),
-    summary: z.string(),
-  }),
-})
-  .then(fetchProductsStep as any)
-  .then(filterNewProductsStep as any)
-  .then(publishProductsStep as any)
-  .commit();
+       VALUES ($1, $2, $3,
