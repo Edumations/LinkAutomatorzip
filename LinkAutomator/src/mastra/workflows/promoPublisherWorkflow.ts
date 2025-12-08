@@ -58,6 +58,16 @@ const KEYWORDS = [
   "Mouse", "Fone", "Câmera", "Drone", "Impressora", "Caixa de Som"
 ];
 
+// --- NOVO: Lista de Lojas para Rotação ---
+const PARTNER_STORES = [
+  { id: "5766", name: "Amazon" },
+  { id: "5632", name: "Magalu" },
+  { id: "5636", name: "Casas Bahia" },
+  { id: "6116", name: "AliExpress" }, // Ótimo para bugigangas
+  { id: "5693", name: "Nike" },      // Cuidado: só vai achar se a keyword for de esporte
+  { id: "6265", name: "Shopee" }     // Verifique se tem acesso
+];
+
 function safeParseFloat(value: any): number {
   if (typeof value === "number") return value;
   if (!value) return 0;
@@ -68,37 +78,27 @@ function safeParseFloat(value: any): number {
   return parseFloat(str) || 0;
 }
 
-// --- FUNÇÃO DE EXTRAÇÃO PROFUNDA (CORREÇÃO) ---
 function extractDeepData(item: any) {
   let price = safeParseFloat(item.price || item.salePrice || item.priceMin || item.priceMax);
   let originalPrice = safeParseFloat(item.originalPrice || item.priceFrom || item.priceMax);
   let store = item.store?.name || item.storeName || item.advertiser?.name;
   let image = item.image || item.thumbnail;
 
-  // Se não achou preço ou loja na raiz, mergulha em 'options'
   if ((price === 0 || !store) && item.options && item.options.length > 0) {
-    // Pega a primeira opção disponível
     const opt = item.options.find((o: any) => o.available) || item.options[0];
     
-    // Tenta pegar preço dentro de pricing (estrutura comum da Lomadee)
     if (opt.pricing && opt.pricing.length > 0) {
         const p = opt.pricing[0];
         if (price === 0) price = safeParseFloat(p.price || p.salePrice || p.listPrice);
     }
-    // Tenta pegar preço direto na option
     if (price === 0) price = safeParseFloat(opt.price);
-
-    // Tenta pegar loja
     if (!store) store = opt.seller?.name || opt.seller || "Loja Parceira";
     
-    // Tenta melhorar a imagem
     if (opt.images && opt.images.length > 0) {
-        // Pega a primeira imagem válida
         const imgObj = opt.images[0];
         image = imgObj.url || imgObj.large || imgObj.medium || image;
     }
   }
-
   return { price, originalPrice, store, image };
 }
 
@@ -120,10 +120,10 @@ function getStoreFromLink(link: string, fallback: string): string {
   return fallback;
 }
 
-// Passo 1: Buscar Produtos
+// Passo 1: Buscar Produtos (ATUALIZADO PARA RODÍZIO DE LOJAS)
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
-  description: "Fetches products sequentially",
+  description: "Fetches products sequentially with store rotation",
   inputSchema: z.object({}),
   outputSchema: z.object({
     success: z.boolean(),
@@ -164,23 +164,40 @@ const fetchProductsStep = createStep({
 
     let allProducts: Product[] = [];
 
-    // Busca Sequencial
+    // Busca Sequencial com Rotação de Loja
     for (const keyword of targets) {
-      const rawItems = await fetchAPI(
-          new URLSearchParams({ keyword, sort: "discount", limit: "3" }), 
-          `Cat: ${keyword}`
+      
+      // Sorteia uma loja e um tipo de ordenação para variar
+      const randomStore = PARTNER_STORES[Math.floor(Math.random() * PARTNER_STORES.length)];
+      const sortMethods = ["discount", "price", "relevance"]; 
+      const randomSort = sortMethods[Math.floor(Math.random() * sortMethods.length)];
+
+      // Primeira tentativa: Tenta buscar NA LOJA ESPECÍFICA
+      console.log(`🔎 Tentando "${keyword}" na loja ${randomStore.name}...`);
+      
+      let rawItems = await fetchAPI(
+          new URLSearchParams({ 
+              keyword, 
+              sort: randomSort, 
+              limit: "3", 
+              storeId: randomStore.id // <--- Aqui está o segredo
+          }), 
+          `Cat: ${keyword} @ ${randomStore.name}`
       );
+
+      // Se falhar (ex: buscar "Geladeira" na Nike retorna 0), faz fallback global
+      if (rawItems.length === 0) {
+         console.log(`⚠️ Sem resultados na ${randomStore.name}. Buscando "${keyword}" geral...`);
+         rawItems = await fetchAPI(
+            new URLSearchParams({ keyword, sort: "discount", limit: "3" }), 
+            `Cat: ${keyword} (Global)`
+        );
+      }
       
       const parsedItems = rawItems.map((item: any) => {
-        // USA A NOVA EXTRAÇÃO PROFUNDA
         const extracted = extractDeepData(item);
         const rawLink = item.link || item.url || "";
         const finalStore = extracted.store || getStoreFromLink(rawLink, "Loja Parceira");
-
-        // Debug se ainda vier zerado
-        if (extracted.price === 0) {
-            // console.log(`🔍 [DEBUG 2] Zero Price: ${item.name}`); // Descomentar se necessário
-        }
 
         return {
           id: String(item.id || item.productId || Math.random().toString(36)),
@@ -201,9 +218,9 @@ const fetchProductsStep = createStep({
       await new Promise(r => setTimeout(r, 1000));
     }
 
-    // FALLBACK
+    // FALLBACK GERAL (Caso a busca específica tenha retornado muito pouco)
     if (allProducts.length < 5) {
-      console.warn("⚠️ Busca específica fraca. Ativando busca GERAL...");
+      console.warn("⚠️ Busca específica fraca. Ativando busca GERAL de emergência...");
       const fb1 = await fetchAPI(new URLSearchParams({ page: "1", limit: "50", sort: "discount" }), "Fallback");
       
       const parsedFb = fb1.map((item: any) => {
@@ -265,7 +282,7 @@ const filterNewProductsStep = createStep({
       const selected: Product[] = [];
       const usedKeywords = new Set<string>();
 
-      // Algoritmo: Tenta 1 por categoria
+      // Algoritmo: Tenta 1 por categoria/loja
       for (const p of available) {
         const key = p.originKeyword || "geral";
         if (!usedKeywords.has(key)) {
@@ -283,7 +300,7 @@ const filterNewProductsStep = createStep({
         }
       }
 
-      console.log(`✅ [Passo 2] ${selected.length} produtos selecionados.`);
+      console.log(`✅ [Passo 2] ${selected.length} produtos selecionados (novos).`);
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
     } catch {
       return { success: false, newProducts: [], alreadyPostedCount: 0 };
