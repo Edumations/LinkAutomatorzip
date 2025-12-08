@@ -3,12 +3,12 @@ import { z } from "zod";
 
 export const lomadeeTool = createTool({
   id: "lomadee-fetch-products",
-  description: "Busca produtos na Lomadee",
+  description: "Busca produtos na Lomadee (API Beta)",
   inputSchema: z.object({
     keyword: z.string(),
     limit: z.number().optional().default(3),
     sort: z.string().optional().default("discount"),
-    storeId: z.string().optional(), // Aceita ID específico
+    storeId: z.string().optional(),
   }),
   outputSchema: z.object({
     products: z.array(z.object({
@@ -24,71 +24,58 @@ export const lomadeeTool = createTool({
     const apiKey = process.env.LOMADEE_API_KEY;
     const sourceId = process.env.LOMADEE_SOURCE_ID;
 
-    if (!apiKey) return { products: [] };
+    if (!apiKey) {
+        console.error("❌ [Lomadee] Falta API Key");
+        return { products: [] };
+    }
 
     try {
+      // Configura os parâmetros para a API Beta (A única estável agora)
       const params = new URLSearchParams({
         keyword: context.keyword,
-        sort: context.sort || "discount",
-        size: String(context.limit || 3)
+        limit: String(context.limit || 3),
+        sort: context.sort || "discount"
       });
 
       if (sourceId) params.append("sourceId", sourceId);
-      // Se tiver ID de loja, força a busca nela
+      
+      // Tenta filtrar por loja se solicitado
       if (context.storeId) params.append("storeId", context.storeId);
 
-      // Usando endpoint v3 padrão
-      const res = await fetch(
-        `https://api.lomadee.com/v3/${process.env.LOMADEE_APP_ID || "15769665116712a4b51a"}/product/_search?${params.toString()}`,
-        { method: "GET" } 
-      );
-      
-      let data = await res.json();
-      
-      // Se a v3 falhar ou vier vazia, tenta a API beta (fallback)
-      if (!data.products || data.products.length === 0) {
-          const paramsBeta = new URLSearchParams({
-            keyword: context.keyword,
-            limit: String(context.limit || 3),
-            sort: context.sort || "discount"
-          });
-          if (sourceId) paramsBeta.append("sourceId", sourceId);
-          if (context.storeId) paramsBeta.append("storeId", context.storeId);
+      console.log(`📡 [Lomadee] Buscando na API Beta: ${context.keyword} (Loja: ${context.storeId || "Geral"})`);
 
-          const resBeta = await fetch(
-              `https://api-beta.lomadee.com.br/affiliate/products?${paramsBeta.toString()}`,
-              { headers: { "x-api-key": apiKey, "Content-Type": "application/json" } }
-          );
-          if (resBeta.ok) {
-             const dataBeta = await resBeta.json();
-             // Normaliza dados da Beta para parecer com a v3
-             if (dataBeta.data) {
-                 return {
-                     products: dataBeta.data.map((item: any) => ({
-                        id: item.id || item.productId,
-                        name: item.name || item.productName,
-                        price: item.price || item.salePrice || 0,
-                        link: item.link || item.url,
-                        image: item.thumbnail || item.image || "",
-                        store: item.store?.name || item.storeName || "Lomadee"
-                     }))
-                 };
-             }
+      // Endereço CORRETO (api-beta.lomadee.com.br)
+      const res = await fetch(
+          `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
+          { 
+            headers: { 
+                "x-api-key": apiKey, 
+                "Content-Type": "application/json" 
+            } 
           }
+      );
+
+      if (!res.ok) {
+          console.error(`❌ [Lomadee Erro] HTTP ${res.status}`);
+          return { products: [] };
       }
 
-      const products = (data.products || []).map((item: any) => ({
-        id: String(item.id),
-        name: item.name,
-        price: item.price,
-        link: item.link,
-        image: item.thumbnail,
-        store: item.store?.name || "Lomadee"
+      const data = await res.json();
+
+      // Mapeia os produtos
+      const products = (data.data || []).map((item: any) => ({
+        id: String(item.id || item.productId),
+        name: item.name || item.productName,
+        price: item.price || item.salePrice || 0,
+        link: item.link || item.url,
+        image: item.thumbnail || item.image || "",
+        store: item.store?.name || item.storeName || "Lomadee"
       }));
 
       return { products };
+
     } catch (e) {
-      console.error("Erro Lomadee Tool:", e);
+      console.error("❌ [Lomadee Exception]", e);
       return { products: [] };
     }
   }
