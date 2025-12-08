@@ -100,8 +100,11 @@ const fetchProductsStep = createStep({
     const fetchAPI = async (params: URLSearchParams) => {
       try {
         if (sourceId) params.append("sourceId", sourceId);
+        
+        console.log(`📡 Tentando conectar na Lomadee com SourceID: ${sourceId || "SEM ID"}...`);
+
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
 
         const res = await fetch(
           `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
@@ -112,10 +115,20 @@ const fetchProductsStep = createStep({
           }
         );
         clearTimeout(timeoutId);
-        if (!res.ok) return [];
+        
+        if (!res.ok) {
+            // AQUI ESTÁ A MUDANÇA: Vamos ver o erro real!
+            const erroTexto = await res.text();
+            console.error(`❌ ERRO API LOMADEE (${res.status}): ${erroTexto}`);
+            return [];
+        }
+        
         const data = await res.json();
         return data.data || [];
-      } catch (e) { return []; }
+      } catch (e) { 
+        console.error("❌ ERRO DE CONEXÃO:", e);
+        return []; 
+      }
     };
 
     // Sorteia 3 categorias para buscar nesta rodada
