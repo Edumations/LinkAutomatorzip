@@ -30,7 +30,7 @@ export const lomadeeTool = createTool({
     }
 
     try {
-      // Configura os parâmetros para a API Beta (A única estável agora)
+      // Configura os parâmetros
       const params = new URLSearchParams({
         keyword: context.keyword,
         limit: String(context.limit || 3),
@@ -42,9 +42,10 @@ export const lomadeeTool = createTool({
       // Tenta filtrar por loja se solicitado
       if (context.storeId) params.append("storeId", context.storeId);
 
-      console.log(`📡 [Lomadee] Buscando na API Beta: ${context.keyword} (Loja: ${context.storeId || "Geral"})`);
+      console.log(`📡 [Lomadee] Buscando na API Beta: ${context.keyword} (Loja ID: ${context.storeId || "Geral"})`);
 
       // Endereço CORRETO (api-beta.lomadee.com.br)
+      // Removemos o api.lomadee.com que estava dando erro
       const res = await fetch(
           `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
           { 
@@ -57,6 +58,7 @@ export const lomadeeTool = createTool({
 
       if (!res.ok) {
           console.error(`❌ [Lomadee Erro] HTTP ${res.status}`);
+          // Se der erro 500 ou 400 com storeId, pode ser que a loja não aceite busca
           return { products: [] };
       }
 
