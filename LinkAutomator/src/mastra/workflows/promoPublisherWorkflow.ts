@@ -6,34 +6,30 @@ import { lomadeeTool } from "../tools/lomadeeTool";
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// --- CONFIGURAÇÃO ---
-// Lista expandida com ID de lojas populares na Lomadee
+// LISTA OTIMIZADA DE LOJAS
 const STORES_TO_TRY = [
     { id: "5632", name: "Magalu" },
-    { id: "5636", name: "Casas Bahia" },
     { id: "5766", name: "Amazon" },
+    { id: "5636", name: "Casas Bahia" },
     { id: "6116", name: "AliExpress" },
-    { id: "5693", name: "Nike" },
+    { id: "5938", name: "KaBuM!" },
     { id: "6373", name: "Girafa" },
     { id: "5778", name: "Carrefour" },
     { id: "6078", name: "Centauro" },
-    { id: "5938", name: "KaBuM!" },
-    { id: undefined, name: "Busca Geral" }
+    { id: undefined, name: "Geral" }
 ];
 
-// LISTA REAL DE PRODUTOS (Sem marcas fictícias)
+// PRODUTOS REAIS DE ALTA CONVERSÃO
 const KEYWORDS = [
-  "Smartphone Samsung", "iPhone 15", "iPhone 14", "iPhone 13", "Xiaomi Redmi", "Motorola Moto G",
-  "Notebook Gamer", "MacBook Air", "Monitor LG", "Teclado Mecânico", "Mouse Logitech", "Headset Gamer", 
-  "Smart TV 50", "Smart TV 55", "Echo Dot Alexa", "Tablet Samsung", "iPad", "Kindle",
-  "PlayStation 5", "Xbox Series S", "Nintendo Switch", "Controle PS5",
-  "Cadeira Gamer", "Mesa Escritório",
-  "Airfryer Mondial", "Airfryer Philco", "Geladeira Frost Free", "Micro-ondas", "Cafeteira Três Corações", "Ventilador", "Ar-condicionado Inverter", "Robô Aspirador",
-  "Tênis Nike", "Tênis Adidas", "Mochila Notebook", "Smartwatch Samsung", "Apple Watch",
-  "Parafusadeira Bosch", "Jogo de Panelas", "Pneu Aro 13", "Pneu Aro 15"
+  "iPhone 15", "iPhone 13", "Samsung Galaxy S24", "Samsung Galaxy S23", "Xiaomi Redmi Note",
+  "Notebook Dell", "Notebook Lenovo", "MacBook Air", "Monitor Gamer", 
+  "Teclado Logitech", "Mouse Gamer", "Headset HyperX", 
+  "TV Samsung 50", "TV LG 55", "Alexa Echo Pop", "Kindle",
+  "PlayStation 5", "Xbox Series S", "Nintendo Switch",
+  "Cadeira Gamer", "Airfryer Mondial", "Geladeira Brastemp", "Máquina de Lavar",
+  "Tênis Nike Revolution", "Tênis Adidas Run", "Whey Protein", "Creatina"
 ];
 
-// Configuração do Banco de Dados
 async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
@@ -41,10 +37,11 @@ async function setupDatabase() {
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
-        product_id_unique VARCHAR(255) UNIQUE NOT NULL,
+        product_id_unique VARCHAR(255) NOT NULL, -- Removida a constraint UNIQUE global para permitir repostagem futura controlada
         product_name TEXT,
         posted_at TIMESTAMP DEFAULT NOW()
       );
+      CREATE INDEX IF NOT EXISTS idx_product_id ON posted_products(product_id_unique);
     `);
     client.release();
   } catch (err) { console.error("❌ Erro DB:", err); }
@@ -56,106 +53,104 @@ const ProductSchema = z.object({
 });
 type Product = z.infer<typeof ProductSchema>;
 
-// --- PASSO 1: BUSCA ROBUSTA ---
+// --- PASSO 1: BUSCA MASSIVA ---
 const fetchStep = createStep({
   id: "fetch-lomadee",
   inputSchema: z.object({}),
   outputSchema: z.object({ success: z.boolean(), products: z.array(ProductSchema) }),
   execute: async ({ mastra }) => {
-    // 1. Seleciona 3 palavras-chave aleatórias da lista
     const selectedKeywords: string[] = [];
+    // Busca 3 categorias diferentes por vez
     while (selectedKeywords.length < 3) {
         const k = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
         if (!selectedKeywords.includes(k)) selectedKeywords.push(k);
     }
     
-    console.log(`🚀 [Multi-Search] Iniciando ciclo para: ${selectedKeywords.join(", ")}`);
-
+    console.log(`🚀 [Job] Buscando: ${selectedKeywords.join(" | ")}`);
     let allProducts: Product[] = [];
 
-    // 2. Itera sobre cada palavra-chave
     for (const keyword of selectedKeywords) {
-        // CORREÇÃO DO FILTRO: Quebra a busca em termos (ex: "Geladeira", "Frost", "Free")
-        // Filtramos palavras pequenas para evitar falsos positivos com "de", "com", etc.
-        const searchTerms = keyword.toLowerCase().split(" ").filter(w => w.length > 2);
+        // Filtro Flexível: Aceita se tiver pelo menos uma palavra chave principal (ex: "Galaxy")
+        const terms = keyword.toLowerCase().split(" ").filter(w => w.length > 3);
         
-        console.log(`🔎 Processando termo: "${keyword}" em ${STORES_TO_TRY.length} canais...`);
-
-        // 3. Dispara buscas em PARALELO
-        const storePromises = STORES_TO_TRY.map(async (store) => {
+        const promises = STORES_TO_TRY.map(async (store) => {
             try {
-                await new Promise(r => setTimeout(r, Math.random() * 500)); // Delay antispa
-
+                // Pequeno delay para não travar a API
+                await new Promise(r => setTimeout(r, Math.random() * 800));
+                
                 const res: any = await lomadeeTool.execute({ 
-                    context: { keyword, limit: 10, sort: "relevance", storeId: store.id }, 
+                    context: { keyword, limit: 12, sort: "relevance", storeId: store.id }, 
                     mastra 
                 });
                 
-                if (res?.products && res.products.length > 0) {
-                    // --- NOVO FILTRO DE COERÊNCIA (MAIS INTELIGENTE) ---
-                    // Aceita se o nome do produto contiver PELO MENOS UMA das palavras chave importantes.
-                    // Ex: Busca "BioZen Geladeira". Produto "Geladeira Consul".
-                    // "Geladeira" bate -> Aceita.
-                    const validItems = res.products.filter((p: any) => {
+                if (res?.products?.length) {
+                    // Filtra lixo (nome não tem nada a ver ou preço errado)
+                    return res.products.filter((p: any) => {
                         const name = p.name.toLowerCase();
-                        const matches = searchTerms.some(term => name.includes(term));
-                        return matches && p.price > 20; // Preço mínimo
+                        return terms.some(t => name.includes(t)) && p.price > 50;
                     });
-                    
-                    if (validItems.length > 0) {
-                        // console.log(`   ✅ [${store.name}] Encontrou ${validItems.length} itens compatíveis.`);
-                    }
-                    return validItems;
                 }
-            } catch (e) { }
+            } catch (e) {}
             return [];
         });
 
-        const results = await Promise.all(storePromises);
+        const results = await Promise.all(promises);
         results.forEach(items => allProducts.push(...items));
     }
 
-    // 4. Limpeza Final
-    const uniqueProducts = Array.from(new Map(allProducts.map(item => [item.id, item])).values());
-    const shuffled = uniqueProducts.sort(() => 0.5 - Math.random());
+    // Deduplicação final por ID (que agora contém a loja)
+    const uniqueMap = new Map();
+    allProducts.forEach(p => uniqueMap.set(p.id, p));
+    const uniqueProducts = Array.from(uniqueMap.values());
 
-    console.log(`✅ CICLO CONCLUÍDO: ${uniqueProducts.length} produtos únicos encontrados.`);
-    return { success: shuffled.length > 0, products: shuffled };
+    console.log(`✅ [Job] Encontrados ${uniqueProducts.length} produtos candidatos.`);
+    return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
 
-// --- PASSO 2: FILTRAGEM DB ---
+// --- PASSO 2: FILTRO INTELIGENTE (Permite Repost) ---
 const filterStep = createStep({
   id: "filter-products",
   inputSchema: z.object({ success: z.boolean(), products: z.array(ProductSchema) }),
   outputSchema: z.object({ success: z.boolean(), newProducts: z.array(ProductSchema) }),
   execute: async ({ inputData }) => {
-    if (!inputData.success || inputData.products.length === 0) return { success: false, newProducts: [] };
+    if (!inputData.success || !inputData.products.length) return { success: false, newProducts: [] };
     
-    const candidates = inputData.products;
-    const ids = candidates.map(p => p.id);
-    if (ids.length === 0) return { success: false, newProducts: [] };
-
-    const placeholders = ids.map((_, i) => `$${i + 1}`).join(", ");
+    const candidates = inputData.products.sort(() => 0.5 - Math.random()); // Embaralha
+    const finalSelection: Product[] = [];
+    const client = await pool.connect();
 
     try {
-        const res = await pool.query(`SELECT product_id_unique FROM posted_products WHERE product_id_unique IN (${placeholders})`, ids);
-        const postedSet = new Set(res.rows.map((r: any) => r.product_id_unique));
-        
-        const newProducts = candidates.filter(p => !postedSet.has(p.id));
-        
-        // Seleciona até 3 produtos para postar neste ciclo
-        const finalSelection = newProducts.slice(0, 3);
-        
-        console.log(`🛡️ Filtragem: ${candidates.length} candidatos -> ${finalSelection.length} selecionados para envio.`);
-        return { success: finalSelection.length > 0, newProducts: finalSelection };
-    } catch (e) { 
-        return { success: false, newProducts: [] }; 
+        for (const p of candidates) {
+            if (finalSelection.length >= 3) break; // Limite por ciclo
+
+            // Verifica se foi postado nos últimos 3 DIAS
+            const res = await client.query(
+                `SELECT 1 FROM posted_products WHERE product_id_unique = $1 AND posted_at > NOW() - INTERVAL '3 days'`,
+                [p.id]
+            );
+
+            if (res.rowCount === 0) {
+                finalSelection.push(p);
+            }
+        }
+    } catch (e) {
+        console.error("Erro DB Filter:", e);
+    } finally {
+        client.release();
     }
+
+    if (finalSelection.length === 0) {
+        console.log("⏸️ [Job] Todos os itens encontrados já foram postados recentemente.");
+    } else {
+        console.log(`✨ [Job] ${finalSelection.length} ofertas inéditas selecionadas para envio.`);
+    }
+
+    return { success: finalSelection.length > 0, newProducts: finalSelection };
   }
 });
 
-// --- PASSO 3: GERAÇÃO DE TEXTO ---
+// --- PASSO 3: COPYWRITING ---
 const copyStep = createStep({
   id: "generate-copy",
   inputSchema: z.object({ success: z.boolean(), newProducts: z.array(ProductSchema) }),
@@ -169,14 +164,12 @@ const copyStep = createStep({
     await Promise.all(enrichedProducts.map(async (p) => {
         const price = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
         const prompt = `
-        Aja como um canal de ofertas no Telegram.
+        Crie um post de oferta URGENTE para Telegram.
         Produto: ${p.name}
         Loja: ${p.store}
         Preço: ${price}
-        Link: ${p.link}
         
-        Escreva uma legenda curta (máx 3 linhas). Use emojis (🔥, 🚨). Destaque o preço e parcelamento se souber.
-        Não use hashtags.
+        Texto curto, impactante, use emojis (🚨, 🔥, 📉). Destaque a economia. Sem hashtags.
         `;
         try {
             const res = await agent?.generateLegacy([{ role: "user", content: prompt }]);
@@ -187,7 +180,7 @@ const copyStep = createStep({
   }
 });
 
-// --- PASSO 4: PUBLICAÇÃO ---
+// --- PASSO 4: DISPARO ---
 const publishStep = createStep({
   id: "publish",
   inputSchema: z.object({ success: z.boolean(), enrichedProducts: z.array(ProductSchema) }),
@@ -204,33 +197,47 @@ const publishStep = createStep({
         if (!token || !chat) break;
 
         const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
-        let text = p.generatedMessage || `🔥 *OFERTA!*\n\n📦 ${p.name}\n💰 *${priceFormatted}*\n🏬 ${p.store}`;
+        let text = p.generatedMessage || `🔥 *OFERTA IMPERDÍVEL!*\n\n📦 ${p.name}\n📉 *${priceFormatted}*\n🏬 Loja: ${p.store}`;
         
-        if (!text.includes("http")) text += `\n\n👇 *COMPRE AQUI:*\n${p.link}`;
+        if (!text.includes("http")) text += `\n\n👇 *GARANTA O SEU:*`;
+        
+        // Link principal (Lomadee)
+        const btnLink = p.link;
 
-        if (amazonTag) {
-            const amazonLink = `https://www.amazon.com.br/s?k=${encodeURIComponent(p.name)}&tag=${amazonTag}`;
-            text += `\n\n🔎 [Ver na Amazon](${amazonLink})`;
-        }
-
+        // Montagem do corpo
         const body: any = { 
             chat_id: chat, 
             parse_mode: "Markdown", 
-            text: text,
-            reply_markup: { inline_keyboard: [[{ text: "🛒 IR PARA A LOJA", url: p.link }]] }
+            text: `${text}\n${btnLink}`, // Link no corpo para garantir clique
+            // Botão inline bonitinho
+            reply_markup: {
+                inline_keyboard: [[{ text: "🛒 VER OFERTA AGORA", url: btnLink }]]
+            }
         };
 
-        if (p.image) { body.photo = p.image; body.caption = text; delete body.text; }
+        if (amazonTag && p.store.toLowerCase().includes("amazon")) {
+             // Se for Amazon, tenta usar tag, mas Lomadee já deve ter redirecionado. 
+             // Mantemos simples para evitar conflito de links.
+        }
+
+        if (p.image) { 
+            body.photo = p.image; 
+            body.caption = body.text; 
+            delete body.text; 
+        }
 
         try {
             const endpoint = p.image ? "sendPhoto" : "sendMessage";
             await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
                 method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
             });
-            await pool.query(`INSERT INTO posted_products (product_id_unique, product_name) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [p.id, p.name]);
+            
+            // Registra no banco para não repetir por 3 dias
+            await pool.query(`INSERT INTO posted_products (product_id_unique, product_name) VALUES ($1, $2)`, [p.id, p.name]);
+            
             count++;
-            console.log(`📢 Enviado: ${p.name}`);
-            await new Promise(r => setTimeout(r, 6000));
+            console.log(`📢 Enviado: ${p.name} (${p.store})`);
+            await new Promise(r => setTimeout(r, 8000)); // Delay entre posts
         } catch (e) { console.error("Erro Telegram:", e); }
     }
     return { success: true, count };
