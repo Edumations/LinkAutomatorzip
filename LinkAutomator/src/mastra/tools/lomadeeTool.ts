@@ -26,20 +26,22 @@ export const lomadeeTool = createTool({
 
     if (!apiKey) return { products: [] };
 
-    // --- CORREÇÃO DO PREÇO ---
+    // Conversor de preço SUPER agressivo
     const parsePrice = (value: any): number => {
-        if (typeof value === 'number') return value;
         if (!value) return 0;
+        if (typeof value === 'number') return value;
         
-        // Remove tudo que não é número, ponto ou vírgula
-        let str = String(value).replace(/[^\d.,]/g, "").trim();
+        // Converte para string e limpa sujeira
+        let str = String(value).trim();
+        
+        // Se vier como "R$ 1.200,50" -> Tira R$ e espaços
+        str = str.replace(/[^\d.,]/g, ""); 
 
-        // Lógica para Brasil (1.000,00) vs EUA (1,000.00)
-        if (str.includes(",") && str.includes(".")) {
-            // Formato 1.234,50 -> Remove ponto, troca vírgula por ponto
-            str = str.replace(/\./g, "").replace(",", ".");
-        } else if (str.includes(",")) {
-            // Formato 1234,50 -> Troca vírgula por ponto
+        // Lógica Brasileira: Se tem vírgula no final (ex: 100,50 ou 1.000,00)
+        if (str.includes(",")) {
+            // Remove pontos de milhar (1.000 -> 1000)
+            str = str.replace(/\./g, "");
+            // Troca vírgula decimal por ponto (1000,50 -> 1000.50)
             str = str.replace(",", ".");
         }
         
@@ -56,7 +58,7 @@ export const lomadeeTool = createTool({
       if (sourceId) params.append("sourceId", sourceId);
       if (context.storeId) params.append("storeId", context.storeId);
 
-      console.log(`📡 [Lomadee] Buscando: ${context.keyword} (Loja: ${context.storeId || "Geral"})`);
+      console.log(`📡 [Lomadee] Buscando: ${context.keyword} (Loja ID: ${context.storeId || "Geral"})`);
 
       const res = await fetch(
           `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
@@ -68,18 +70,22 @@ export const lomadeeTool = createTool({
       const data = await res.json();
       const rawProducts = data.data || [];
 
-      // Mapeamento com Debug de Preço
       const products = rawProducts.map((item: any) => {
-        // Tenta achar o preço em qualquer campo
+        // TENTA ACHAR PREÇO EM TUDO QUE É LUGAR
         let finalPrice = parsePrice(item.price);
+        
         if (finalPrice === 0) finalPrice = parsePrice(item.salePrice);
-        if (finalPrice === 0) finalPrice = parsePrice(item.priceFrom);
+        if (finalPrice === 0) finalPrice = parsePrice(item.priceMin); // Comum em marketplaces
+        if (finalPrice === 0) finalPrice = parsePrice(item.priceMax);
         if (finalPrice === 0 && item.installment) finalPrice = parsePrice(item.installment.price);
 
-        // Se ainda for zero, imprime no log para descobrirmos o motivo
+        // --- DIAGNÓSTICO DE ERRO ---
+        // Se ainda for zero, imprime o item bruto para descobrirmos o problema
         if (finalPrice === 0) {
-             // console.log(`⚠️ Preço Zero no item: ${item.name} | Raw: ${JSON.stringify(item.price || item.salePrice)}`);
+             console.log("🚨 [DEBUG] ITEM COM PREÇO ZERO ENCONTRADO:");
+             console.log(JSON.stringify(item, null, 2)); // Mostra o JSON puro
         }
+        // ---------------------------
 
         return {
             id: String(item.id || item.productId),
