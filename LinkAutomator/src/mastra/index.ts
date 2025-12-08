@@ -18,6 +18,16 @@ import { promoPublisherWorkflow } from "./workflows/promoPublisherWorkflow";
 import { mercadolivreTool } from "./tools/mercadolivreTool";
 import { lomadeeTool } from "./tools/lomadeeTool";
 import { telegramTool } from "./tools/telegramTool";
+import { registerCronTrigger } from "../triggers/cronTriggers";
+
+// --- AQUI ESTÁ A MÁGICA DO 24/7 ---
+// Registra para rodar a cada 15 minutos (por exemplo)
+// "*/15 * * * *" significa: A cada 15 minutos, de todas as horas, todos os dias.
+// Isso garante fluxo constante sem sobrecarregar ou travar.
+registerCronTrigger({
+  cronExpression: "*/15 * * * *", 
+  workflow: promoPublisherWorkflow
+});
 import {
   checkPostedProductsTool,
   markProductAsPostedTool,
