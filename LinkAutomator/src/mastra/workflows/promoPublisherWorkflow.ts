@@ -22,6 +22,8 @@ async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
     const client = await pool.connect();
+    // Limpeza desativada.
+    // await client.query('DELETE FROM posted_products'); 
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
@@ -42,9 +44,9 @@ type Product = z.infer<typeof ProductSchema>;
 
 const KEYWORDS = [
   "Smartphone", "iPhone", "Samsung Galaxy", "Notebook", "Smartwatch", 
-  "Monitor Gamer", "Teclado", "Mouse", "Headset", "Caixa de som JBL", 
-  "TV 4K", "Alexa Echo", "Tablet", "Placa de vídeo", "Processador", 
-  "PlayStation 5", "Xbox Series", "Nintendo Switch", "Cadeira Gamer", 
+  "Monitor", "Teclado", "Mouse", "Headset", "JBL", 
+  "TV", "Alexa", "Tablet", "Placa de vídeo", "Processador", 
+  "PlayStation", "Xbox", "Nintendo", "Cadeira Gamer", 
   "Airfryer", "Geladeira", "Micro-ondas", "Cafeteira", "Ventilador", 
   "Ar-condicionado", "Tênis", "Mochila", "Ferramentas", "Pneu"
 ];
@@ -54,49 +56,66 @@ const fetchStep = createStep({
   inputSchema: z.object({}),
   outputSchema: z.object({ success: z.boolean(), products: z.array(ProductSchema) }),
   execute: async ({ mastra }) => {
-    console.log("🚀 [Passo 1] Iniciando Busca MULTLOJA...");
+    console.log("🚀 [Passo 1] Iniciando Busca MULTLOJA com FILTRO DE COERÊNCIA...");
+    
     const keyword = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
+    // Pega a primeira palavra da busca para validar (ex: "PlayStation" de "PlayStation 5")
+    const mainKeyword = keyword.split(" ")[0].toLowerCase();
+
     const selectedStores = STORES_TO_TRY.sort(() => 0.5 - Math.random()).slice(0, 3);
-    console.log(`🔎 Buscando: "${keyword}" nas lojas: ${selectedStores.map(s => s.name).join(", ")}`);
+    console.log(`🔎 Buscando: "${keyword}" (Validação: deve conter "${mainKeyword}")`);
 
     let allProducts: Product[] = [];
 
     await Promise.all(selectedStores.map(async (store) => {
         try {
             const res: any = await lomadeeTool.execute({ 
-                context: { keyword, limit: 10, sort: "relevance", storeId: store.id }, 
+                context: { keyword, limit: 15, sort: "relevance", storeId: store.id }, 
                 mastra 
             });
+            
             if (res?.products && res.products.length > 0) {
-                console.log(`✅ ${store.name}: Achou ${res.products.length} itens.`);
-                allProducts.push(...res.products);
+                // --- FILTRO DE COERÊNCIA ---
+                // Verifica se o nome do produto contém a palavra-chave principal
+                const coherentProducts = res.products.filter((p: any) => 
+                    p.name.toLowerCase().includes(mainKeyword)
+                );
+
+                if (coherentProducts.length > 0) {
+                    console.log(`✅ ${store.name}: ${coherentProducts.length} itens válidos (filtrou ${res.products.length - coherentProducts.length} lixos).`);
+                    allProducts.push(...coherentProducts);
+                } else {
+                    console.log(`🗑️ ${store.name}: Retornou ${res.products.length} itens, mas nenhum era "${keyword}". Descartados.`);
+                }
             }
         } catch (e) { console.error(`Erro ${store.name}:`, e); }
     }));
 
     if (allProducts.length === 0) {
-        console.log("⚠️ Lojas falharam. Tentando Busca Geral...");
+        console.log("⚠️ Nenhuma loja trouxe o produto exato. Tentando Busca Geral...");
         try {
             const resGeral: any = await lomadeeTool.execute({ 
                 context: { keyword, limit: 20, sort: "relevance" }, mastra 
             });
-            if (resGeral?.products) allProducts = resGeral.products;
+            // Aplica o mesmo filtro na busca geral
+            if (resGeral?.products) {
+                const validGeral = resGeral.products.filter((p: any) => p.name.toLowerCase().includes(mainKeyword));
+                if (validGeral.length > 0) {
+                    console.log(`📦 Busca Geral salvou o dia: ${validGeral.length} itens.`);
+                    allProducts = validGeral;
+                }
+            }
         } catch (e) {}
     }
 
-    // --- MUDANÇA: Log para depuração ---
-    const totalAchado = allProducts.length;
-    // Baixei o filtro para R$ 10,00. Se for notebook, vai passar. Se for capa, passa também.
+    // Filtro de preço mínimo
     const validProducts = allProducts.filter(p => p.price > 10);
     
-    if (totalAchado > 0 && validProducts.length === 0) {
-        console.error(`🚨 ALERTA: Achou ${totalAchado} itens mas TODOS foram filtrados. Preços vieram zerados? Exemplo: ${allProducts[0].price}`);
-    }
-
+    // Remove duplicatas
     const uniqueProducts = Array.from(new Map(validProducts.map(item => [item.id, item])).values());
     const shuffled = uniqueProducts.sort(() => 0.5 - Math.random());
 
-    console.log(`✅ TOTAL COMBINADO: ${shuffled.length} produtos válidos (de ${totalAchado} originais).`);
+    console.log(`✅ TOTAL FINAL VÁLIDO: ${shuffled.length} produtos.`);
     return { success: shuffled.length > 0, products: shuffled };
   },
 });
@@ -133,7 +152,7 @@ const copyStep = createStep({
 
     await Promise.all(enrichedProducts.map(async (p) => {
         const price = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
-        const prompt = `Post Telegram. Produto: ${p.name}. Preço: ${price}. Loja: ${p.store}. Link: ${p.link}. Emojis!`;
+        const prompt = `Post Telegram curto. Produto: ${p.name}. Preço: ${price}. Loja: ${p.store}. Link: ${p.link}. Emojis!`;
         try {
             const res = await agent?.generateLegacy([{ role: "user", content: prompt }]);
             p.generatedMessage = res?.text || "";
