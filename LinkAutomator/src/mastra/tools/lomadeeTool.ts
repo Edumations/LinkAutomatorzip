@@ -3,10 +3,10 @@ import { z } from "zod";
 
 export const lomadeeTool = createTool({
   id: "lomadee-fetch-products",
-  description: "Busca produtos na Lomadee com Diagnóstico Avançado",
+  description: "Busca produtos na Lomadee com ID composto por loja",
   inputSchema: z.object({
     keyword: z.string(),
-    limit: z.number().optional().default(10),
+    limit: z.number().optional().default(12),
     sort: z.string().optional().default("relevance"),
     storeId: z.string().optional(),
   }),
@@ -24,13 +24,9 @@ export const lomadeeTool = createTool({
     const apiKey = process.env.LOMADEE_API_KEY;
     const sourceId = process.env.LOMADEE_SOURCE_ID;
 
-    // Validação inicial de Ambiente
     if (!apiKey) {
-        console.error("❌ [Lomadee] ERRO CRÍTICO: Variável LOMADEE_API_KEY não definida.");
+        console.error("❌ [Lomadee] ERRO: Variável LOMADEE_API_KEY ausente.");
         return { products: [] };
-    }
-    if (!sourceId) {
-        console.warn("⚠️ [Lomadee] AVISO: Variável LOMADEE_SOURCE_ID não definida. A maioria das buscas falhará sem ela.");
     }
 
     const parsePrice = (value: any): number => {
@@ -38,14 +34,9 @@ export const lomadeeTool = createTool({
         if (typeof value === 'number') return value;
         try {
             let str = String(value).trim();
-            // Remove tudo que não é dígito, ponto ou vírgula
             str = str.replace(/[^\d.,]/g, ""); 
-            // Corrige formato brasileiro (1.000,00 -> 1000.00)
-            if (str.includes(",") && str.includes(".")) {
-                str = str.replace(/\./g, "").replace(",", ".");
-            } else if (str.includes(",")) {
-                str = str.replace(",", ".");
-            }
+            if (str.includes(",") && str.includes(".")) str = str.replace(/\./g, "").replace(",", ".");
+            else if (str.includes(",")) str = str.replace(",", ".");
             return parseFloat(str) || 0;
         } catch { return 0; }
     };
@@ -53,84 +44,57 @@ export const lomadeeTool = createTool({
     try {
       const params = new URLSearchParams({
         keyword: context.keyword,
-        size: String(context.limit || 10), // Algumas APIs usam 'size' em vez de 'limit'
+        size: String(context.limit || 12),
         sort: context.sort || "relevance"
       });
 
       if (sourceId) params.append("sourceId", sourceId);
       if (context.storeId) params.append("storeId", context.storeId);
 
-      const endpoint = `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`;
-      
-      console.log(`📡 [Lomadee] GET: ${endpoint.replace(apiKey, "***")}`); // Log seguro
-
-      const res = await fetch(endpoint, { 
-          headers: { 
-              "x-api-key": apiKey, 
-              "Content-Type": "application/json",
-              "User-Agent": "MastraBot/1.0" // Ajuda a não ser bloqueado
-          } 
+      const res = await fetch(`https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`, { 
+          headers: { "x-api-key": apiKey, "Content-Type": "application/json" } 
       });
 
-      // --- DIAGNÓSTICO DE RESPOSTA ---
       if (!res.ok) {
-          const errText = await res.text();
-          console.error(`❌ [Lomadee] Falha API: Status ${res.status} ${res.statusText}`);
-          console.error(`❌ [Lomadee] Detalhe: ${errText}`);
+          console.log(`⚠️ [Lomadee] API retornou erro ${res.status} para loja ${context.storeId || "Geral"}`);
           return { products: [] };
       }
 
       const data: any = await res.json();
-      
-      // Ajuste para diferentes formatos de resposta da Lomadee (v2/v3/beta)
-      const rawProducts = data.data || data.products || data.items || [];
-      
-      if (rawProducts.length === 0) {
-          console.log(`⚠️ [Lomadee] Busca por "${context.keyword}" retornou lista vazia. Verifique se a loja ${context.storeId || "Geral"} tem este item.`);
-          return { products: [] };
-      }
+      const rawProducts = data.data || data.products || [];
 
       const products = rawProducts.map((item: any) => {
-        let finalPrice = 0;
-
-        // Estratégia "Tente Tudo" para achar o preço
-        finalPrice = parsePrice(item.price) || parsePrice(item.salePrice) || parsePrice(item.priceMin);
-
-        // Busca profunda em options/pricing
-        if (finalPrice === 0 && item.options?.length > 0) {
-            const opt = item.options[0];
-            finalPrice = parsePrice(opt.price) || parsePrice(opt.salePrice);
-            
-            if (finalPrice === 0 && opt.pricing?.length > 0) {
-                finalPrice = parsePrice(opt.pricing[0].price) || parsePrice(opt.pricing[0].salePrice);
-            }
+        // Preço
+        let finalPrice = parsePrice(item.price) || parsePrice(item.salePrice) || parsePrice(item.priceMin);
+        if (finalPrice === 0 && item.options?.[0]) {
+            finalPrice = parsePrice(item.options[0].price) || parsePrice(item.options[0].salePrice);
         }
 
-        // Busca profunda de imagem
+        // Imagem
         let finalImage = item.thumbnail || item.image || item.picture;
         if (!finalImage && item.options?.[0]?.images?.[0]) {
-             const img = item.options[0].images[0];
-             finalImage = img.url || img.large || img.medium;
+             finalImage = item.options[0].images[0].url || item.options[0].images[0].medium;
         }
 
+        // Loja e ID
+        const storeName = item.store?.name || item.storeName || "Oferta";
+        // TRUQUE DE MESTRE: O ID agora inclui a loja. Isso evita que o iPhone da Amazon bloqueie o iPhone da Magalu.
+        const uniqueId = `${item.id || item.productId}-${storeName.replace(/\s+/g, '')}`;
+
         return {
-            id: String(item.id || item.productId || Math.random()),
+            id: uniqueId,
             name: item.name || item.productName || context.keyword,
             price: finalPrice,
-            link: item.link || item.url || item.shortUrl || "",
+            link: item.link || item.url || "",
             image: finalImage || "",
-            store: item.store?.name || item.storeName || "Lomadee"
+            store: storeName
         };
       });
 
-      // Filtra itens quebrados antes de retornar
-      const validProducts = products.filter((p: any) => p.price > 0 && p.link !== "");
-      console.log(`✅ [Lomadee] Sucesso: ${validProducts.length} itens válidos recuperados.`);
-
-      return { products: validProducts };
+      // Filtra itens inválidos (sem preço ou link)
+      return { products: products.filter((p: any) => p.price > 0 && p.link) };
 
     } catch (e) {
-      console.error("❌ [Lomadee Exception]", e);
       return { products: [] };
     }
   }
