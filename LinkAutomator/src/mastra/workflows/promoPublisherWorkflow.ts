@@ -1,7 +1,6 @@
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import pg from "pg";
-// --- IMPORTAÇÃO DIRETA DAS FERRAMENTAS (A SOLUÇÃO) ---
 import { lomadeeTool } from "../tools/lomadeeTool";
 import { mercadolivreTool } from "../tools/mercadolivreTool";
 
@@ -16,6 +15,12 @@ async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
     const client = await pool.connect();
+    
+    // --- CORREÇÃO DO ERRO ---
+    // Apaga a tabela antiga para recriar com a coluna "product_id_unique" correta
+    await client.query(`DROP TABLE IF EXISTS posted_products`);
+    // ------------------------
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
@@ -24,6 +29,7 @@ async function setupDatabase() {
         posted_at TIMESTAMP DEFAULT NOW()
       );
     `);
+    console.log("✅ Banco de dados atualizado com sucesso!");
     client.release();
   } catch (err) { console.error("❌ Erro DB:", err); }
 }
@@ -48,7 +54,7 @@ const KEYWORDS = [
   "Geladeira Inox", "Ventilador", "Cadeira Gamer"
 ];
 
-// Passo 1: Busca Híbrida (Lomadee + Mercado Livre)
+// Passo 1: Busca Híbrida
 const fetchHybridStep = createStep({
   id: "fetch-hybrid",
   inputSchema: z.object({}),
@@ -61,9 +67,8 @@ const fetchHybridStep = createStep({
 
     let allProducts: Product[] = [];
 
-    // --- 1. TENTA LOMADEE (IMPORTADO DIRETO) ---
+    // --- 1. TENTA LOMADEE ---
     try {
-        // Chamada direta sem depender do mastra.getTool
         const res: any = await lomadeeTool.execute({ 
             context: { keyword, limit: 3, sort: "discount" },
             mastra 
@@ -80,7 +85,7 @@ const fetchHybridStep = createStep({
         console.error("Erro Lomadee:", e); 
     }
 
-    // --- 2. TENTA MERCADO LIVRE (IMPORTADO DIRETO) ---
+    // --- 2. TENTA MERCADO LIVRE ---
     try {
         const res: any = await mercadolivreTool.execute({ 
             context: { keyword, limit: 3 },
@@ -89,7 +94,7 @@ const fetchHybridStep = createStep({
         
         if (res?.products) {
             const mlProducts = res.products.map((p: any) => ({
-                id: `MLB-${p.id}`, // Prefixo para evitar conflito
+                id: `MLB-${p.id}`, 
                 name: p.name,
                 price: p.price,
                 link: p.link,
@@ -103,7 +108,6 @@ const fetchHybridStep = createStep({
         console.error("Erro ML:", e); 
     }
 
-    // Remove duplicatas
     const uniqueProducts = Array.from(new Map(allProducts.map(item => [item.id, item])).values());
     
     console.log(`✅ TOTAL FINAL: ${uniqueProducts.length} produtos.`);
@@ -121,7 +125,6 @@ const filterStep = createStep({
     
     const candidates = inputData.products;
     const ids = candidates.map(p => p.id);
-    // Correção para array vazio no SQL
     if (ids.length === 0) return { success: false, newProducts: [] };
 
     const placeholders = ids.map((_, i) => `$${i + 1}`).join(", ");
