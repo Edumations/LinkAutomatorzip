@@ -18,7 +18,7 @@ async function setupDatabase() {
     
     // --- CORREÇÃO DO ERRO ---
     // Apaga a tabela antiga para recriar com a coluna "product_id_unique" correta
-    await client.query(`DROP TABLE IF EXISTS posted_products`);
+    // await client.query(`DROP TABLE IF EXISTS posted_products`);
     // ------------------------
 
     await client.query(`
