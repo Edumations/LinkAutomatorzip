@@ -13,8 +13,18 @@ async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
     const client = await pool.connect();
-    await client.query('DELETE FROM posted_products');
-    console.log("💥 HISTÓRICO LIMPO COM SUCESSO! O bot vai repostar tudo. 💥")
+    
+    // --- LIMPEZA DE BANCO (BOMBA) ---
+    // Se quiser limpar o histórico para testar, mantenha descomentado abaixo.
+    // Se quiser manter o histórico, coloque "//" na frente da linha await.
+    try {
+        await client.query('DELETE FROM posted_products'); 
+        console.log("💥 HISTÓRICO LIMPO! O bot vai repostar tudo.");
+    } catch (e) {
+        console.log("Banco já estava limpo ou erro ao limpar.");
+    }
+    // -------------------------------
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
@@ -68,10 +78,10 @@ const STORES = {
   ALIEXPRESS: "6116",
   NIKE: "5693",
   SHOPEE: "6265",
-  NETSHOES: "5632" // (Usando Magalu/Netshoes ID genérico se não tiver específico, ou ajuste)
+  NETSHOES: "5632"
 };
 
-// --- ROTEADOR INTELIGENTE: Define onde buscar cada coisa ---
+// --- ROTEADOR INTELIGENTE ---
 function getStoresForKeyword(keyword: string) {
   const k = keyword.toLowerCase();
 
@@ -155,7 +165,7 @@ function getStoreFromLink(link: string, fallback: string): string {
   return fallback;
 }
 
-// Passo 1: Buscar Produtos (COM ROTEAMENTO INTELIGENTE)
+// Passo 1: Buscar Produtos
 const fetchProductsStep = createStep({
   id: "fetch-lomadee-products",
   description: "Fetches products with smart routing",
@@ -175,7 +185,6 @@ const fetchProductsStep = createStep({
       try {
         if (sourceId) params.append("sourceId", sourceId);
         
-        // Timeout de 8s para não travar o bot
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 8000);
 
@@ -201,17 +210,14 @@ const fetchProductsStep = createStep({
     };
 
     const shuffled = [...KEYWORDS].sort(() => 0.5 - Math.random());
-    const targets = shuffled.slice(0, 8); // Reduzi para 8 para ser mais rápido
+    const targets = shuffled.slice(0, 8); 
     console.log(`🚀 [Passo 1] Buscando: ${targets.join(", ")}`);
 
     let allProducts: Product[] = [];
 
     for (const keyword of targets) {
-      // 1. Descobre quais lojas fazem sentido para essa keyword
       const targetStores = getStoresForKeyword(keyword);
-      // 2. Escolhe uma delas aleatoriamente
       const chosenStore = targetStores[Math.floor(Math.random() * targetStores.length)];
-      
       const sortMethods = ["discount", "price", "relevance"]; 
       const randomSort = sortMethods[Math.floor(Math.random() * sortMethods.length)];
 
@@ -227,7 +233,6 @@ const fetchProductsStep = createStep({
           `${keyword} @ ${chosenStore.name}`
       );
 
-      // Fallback: Se não achou na loja específica, tenta busca global
       if (rawItems.length === 0) {
          console.log(`⚠️ Nada na ${chosenStore.name}. Tentando "${keyword}" geral...`);
          rawItems = await fetchAPI(
@@ -254,11 +259,10 @@ const fetchProductsStep = createStep({
         };
       });
 
-      allProducts.push(...parsedItems.filter(p => p.price > 10)); // Filtra itens muito baratos (erros)
-      await new Promise(r => setTimeout(r, 800)); // Pequena pausa
+      allProducts.push(...parsedItems.filter(p => p.price > 10)); 
+      await new Promise(r => setTimeout(r, 800)); 
     }
 
-    // Remover duplicatas brutas da API
     const uniqueProducts = Array.from(new Map(allProducts.map(item => [item.id, item])).values());
 
     console.log(`✅ [Passo 1] Total Encontrado: ${uniqueProducts.length} produtos.`);
@@ -266,7 +270,7 @@ const fetchProductsStep = createStep({
   },
 });
 
-// Passo 2: Filtrar (Com lógica anti-spam)
+// Passo 2: Filtrar
 const filterNewProductsStep = createStep({
   id: "filter-new-products",
   description: "Filters duplicates from DB",
@@ -287,8 +291,6 @@ const filterNewProductsStep = createStep({
 
     try {
       const productIds = inputData.products.map((p) => p.id);
-      
-      // Verifica no banco
       const placeholders = productIds.map((_, i) => `$${i + 1}`).join(", ");
       const result = await pool.query(
         `SELECT lomadee_product_id FROM posted_products WHERE lomadee_product_id IN (${placeholders})`,
@@ -299,10 +301,7 @@ const filterNewProductsStep = createStep({
       const available = inputData.products.filter((p) => !postedIds.has(p.id));
       
       console.log(`🧐 [Filtro] De ${inputData.products.length} encontrados, ${postedIds.size} já foram postados.`);
-
-      // Seleciona até 10 para não floodar
       const selected = available.slice(0, 10);
-
       console.log(`✅ [Passo 2] ${selected.length} produtos PRONTOS para postar.`);
       return { success: true, newProducts: selected, alreadyPostedCount: result.rowCount || 0 };
     } catch (e) {
@@ -333,7 +332,6 @@ const generateCopyStep = createStep({
     const agent = mastra?.getAgent("promoPublisherAgent");
     const enrichedProducts = [...inputData.newProducts];
 
-    // Processa em paralelo para ser mais rápido
     await Promise.all(enrichedProducts.map(async (p) => {
         const priceText = p.price > 0 
             ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price)
@@ -344,14 +342,7 @@ const generateCopyStep = createStep({
             PRODUTO: ${p.name}
             PREÇO: ${priceText}
             LOJA: ${p.store}
-            
             Use emojis. Seja direto.
-            Formato:
-            🔥 [Nome do Produto]
-            
-            💰 [Preço] na [Loja]
-            
-            👇 Link abaixo:
         `;
         try {
             const result = await agent?.generateLegacy([{ role: "user", content: prompt }]);
@@ -377,11 +368,74 @@ async function sendTelegramMessage(product: Product): Promise<boolean> {
         : "Oferta!";
         
     let text = product.generatedMessage || "";
-    // Fallback se a IA falhar ou o texto for vazio
     if (!text || text.length < 10) {
       text = `🔥 *${product.name}*\n\n💰 *${priceText}*\n🏠 Loja: ${product.store}\n\n👇 Link Oficial:`;
     }
-    // Garante que o link esteja no final se a IA esqueceu
     if (!text.includes("http")) text += `\n${product.link}`;
 
-    const endpoint = product.image ? "sendPhoto" : "sendMessage
+    const endpoint = product.image ? "sendPhoto" : "sendMessage";
+    const body: any = { chat_id: chat, parse_mode: "Markdown", disable_web_page_preview: false };
+
+    if (product.image) {
+      body.photo = product.image;
+      body.caption = text;
+    } else {
+      body.text = text;
+    }
+
+    const res = await fetch(`https://api.telegram.org/bot${token}/${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    });
+
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function markPosted(id: string) {
+  try {
+    await pool.query(`INSERT INTO posted_products (lomadee_product_id, posted_telegram) VALUES ($1, TRUE) ON CONFLICT (lomadee_product_id) DO NOTHING`, [id]);
+  } catch {}
+}
+
+const publishStep = createStep({
+  id: "publish",
+  description: "Publish",
+  inputSchema: z.object({ success: z.boolean(), enrichedProducts: z.array(ProductSchema) }),
+  outputSchema: z.object({ success: z.boolean(), count: z.number() }),
+  execute: async ({ inputData }) => {
+    console.log("🚀 [Passo 4] Publicando...");
+    if (!inputData.success || inputData.enrichedProducts.length === 0) {
+        console.log("😴 Nada para publicar nesta rodada.");
+        return { success: true, count: 0 };
+    }
+
+    let count = 0;
+    
+    for (const p of inputData.enrichedProducts) {
+      const sent = await sendTelegramMessage(p);
+      if (sent) {
+        await markPosted(p.id);
+        count++;
+        // CORREÇÃO: A aspa abaixo estava faltando no seu código anterior
+        console.log(`✅ [Telegram] Enviado: ${p.name.substring(0, 30)}...`); 
+        await new Promise(r => setTimeout(r, 4000));
+      } else {
+        console.error(`❌ Falha ao enviar: ${p.name}`);
+      }
+    }
+    return { success: true, count };
+  }
+});
+
+export const promoPublisherWorkflow = createWorkflow({
+  id: "promo-workflow",
+  inputSchema: z.object({}),
+  outputSchema: z.object({ success: z.boolean(), count: z.number() }),
+})
+  .then(fetchProductsStep)
+  .then(filterNewProductsStep)
+  .then(generateCopyStep)
+  .then(publishStep)
+  .commit();
