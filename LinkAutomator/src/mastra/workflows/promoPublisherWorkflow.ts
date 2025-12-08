@@ -6,7 +6,7 @@ import { lomadeeTool } from "../tools/lomadeeTool";
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// LISTA DE LOJAS PARA TENTAR
+// LISTA DE LOJAS
 const STORES_TO_TRY = [
     { id: "5632", name: "Magalu" },
     { id: "5636", name: "Casas Bahia" },
@@ -21,14 +21,8 @@ async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
     const client = await pool.connect();
-    
-    // --- LIMPEZA DE BANCO ATIVADA (PARA DESTRAVAR POSTAGENS) ---
-    try {
-        await client.query('DELETE FROM posted_products');
-        console.log("💥 HISTÓRICO LIMPO! O bot vai repostar as ofertas da Magalu.");
-    } catch (e) { console.log("Erro ao limpar banco (pode estar vazio)."); }
-    // -----------------------------------------------------------
-
+    // Limpeza desativada para produção (ative se quiser testar do zero)
+    // await client.query('DELETE FROM posted_products');
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
@@ -49,12 +43,11 @@ type Product = z.infer<typeof ProductSchema>;
 
 const KEYWORDS = [
   "Smartphone", "iPhone", "Samsung Galaxy", "Notebook", "Smartwatch", 
-  "Monitor Gamer", "Teclado", "Mouse", "Headset", "Caixa de som JBL", 
-  "TV 4K", "Alexa", "Tablet", "SSD", "Placa de vídeo", "Processador", 
-  "Webcam", "Impressora", "Drone", "Câmera", "PlayStation 5", "Xbox", 
-  "Nintendo Switch", "Kindle", "Cadeira Gamer", "Airfryer", "Fogão", 
-  "Geladeira", "Micro-ondas", "Cafeteira", "Ventilador", "Ar-condicionado", 
-  "Fone de ouvido", "Tênis", "Relógio", "Perfume", "Whey Protein", "Bicicleta"
+  "Monitor Gamer", "Teclado Mecânico", "Mouse Gamer", "Headset", "Caixa de som JBL", 
+  "TV 4K", "Alexa Echo", "Tablet", "Placa de vídeo", "Processador", 
+  "PlayStation 5", "Xbox Series", "Nintendo Switch", "Cadeira Gamer", 
+  "Airfryer", "Geladeira", "Micro-ondas", "Cafeteira Expresso", 
+  "Ar-condicionado", "Tênis de Corrida", "Bicicleta"
 ];
 
 const fetchStep = createStep({
@@ -62,46 +55,41 @@ const fetchStep = createStep({
   inputSchema: z.object({}),
   outputSchema: z.object({ success: z.boolean(), products: z.array(ProductSchema) }),
   execute: async ({ mastra }) => {
-    console.log("🚀 [Passo 1] Iniciando Busca Lomadee...");
+    console.log("🚀 [Passo 1] Iniciando Busca Inteligente...");
     const keyword = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
-    
-    // Sorteia uma loja
     const targetStore = STORES_TO_TRY[Math.floor(Math.random() * STORES_TO_TRY.length)];
-    console.log(`🔎 Tentando: "${keyword}" na loja: ${targetStore.name} (ID: ${targetStore.id || "Geral"})`);
+    console.log(`🔎 Buscando: "${keyword}" na ${targetStore.name}`);
 
     let allProducts: Product[] = [];
 
     try {
-        // BUSCA 50 ITENS PARA TER VARIEDADE
+        // MUDANÇA 1: sort="relevance" para trazer o produto certo, não acessório
         const res: any = await lomadeeTool.execute({ 
-            context: { keyword, limit: 50, sort: "discount", storeId: targetStore.id }, 
+            context: { keyword, limit: 50, sort: "relevance", storeId: targetStore.id }, 
             mastra 
         });
         
         if (res?.products && res.products.length > 0) {
-            console.log(`✅ Sucesso na ${targetStore.name}: ${res.products.length} itens encontrados.`);
-            // Embaralha para pegar produtos diferentes dos primeiros
-            allProducts = res.products.sort(() => 0.5 - Math.random());
+            allProducts = res.products;
         } else {
-            console.log(`⚠️ Falha na ${targetStore.name}. Tentando Busca Geral...`);
+            console.log(`⚠️ Falha na ${targetStore.name}. Tentando Geral...`);
             const resGeral: any = await lomadeeTool.execute({ 
-                context: { keyword, limit: 50, sort: "discount" }, 
+                context: { keyword, limit: 50, sort: "relevance" }, 
                 mastra 
             });
-            if (resGeral?.products) {
-                console.log(`📦 Busca Geral trouxe: ${resGeral.products.length} itens.`);
-                allProducts = resGeral.products.sort(() => 0.5 - Math.random());
-            }
+            if (resGeral?.products) allProducts = resGeral.products;
         }
-    } catch (e) { console.error("Erro Lomadee:", e); }
+    } catch (e) { console.error("Erro:", e); }
 
-    const finalProducts = allProducts.map((p: any) => ({
-        ...p,
-        store: p.store || "Loja Parceira"
-    }));
+    // MUDANÇA 2: Filtro de preço mínimo (R$ 30) para evitar cabos e capas baratas
+    // E garante que o preço seja maior que 0
+    const filteredProducts = allProducts.filter(p => p.price > 30);
 
-    const uniqueProducts = Array.from(new Map(finalProducts.map(item => [item.id, item])).values());
-    console.log(`✅ TOTAL PARA FILTRO: ${uniqueProducts.length} produtos.`);
+    // Embaralha para variar
+    const shuffled = filteredProducts.sort(() => 0.5 - Math.random());
+
+    const uniqueProducts = Array.from(new Map(shuffled.map(item => [item.id, item])).values());
+    console.log(`✅ TOTAL VÁLIDO: ${uniqueProducts.length} produtos (Preço > 30).`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
@@ -121,10 +109,7 @@ const filterStep = createStep({
         const res = await pool.query(`SELECT product_id_unique FROM posted_products WHERE product_id_unique IN (${placeholders})`, ids);
         const posted = new Set(res.rows.map((r: any) => r.product_id_unique));
         const newProducts = candidates.filter(p => !posted.has(p.id));
-        
-        console.log(`✅ Filtrados: ${newProducts.length} produtos INÉDITOS.`);
-        
-        // Pega 3 produtos para postar
+        console.log(`✅ Inéditos: ${newProducts.length}.`);
         return { success: true, newProducts: newProducts.slice(0, 3) };
     } catch (e) { return { success: false, newProducts: [] }; }
   }
@@ -165,7 +150,12 @@ const publishStep = createStep({
     for (const p of inputData.enrichedProducts) {
         if (!token || !chat) continue;
         
-        let text = p.generatedMessage || `🔥 ${p.name}\n💰 ${p.price}`;
+        // Formata o preço para o texto
+        const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
+        
+        let text = p.generatedMessage || `🔥 ${p.name}\n💰 ${priceFormatted}`;
+        // Se a IA falhou em por o preço, forçamos aqui
+        if (!text.includes("R$")) text += `\n💰 ${priceFormatted}`;
         if (!text.includes("http")) text += `\n👇 Oferta Principal:\n${p.link}`;
 
         if (amazonTag) {
@@ -182,7 +172,7 @@ const publishStep = createStep({
             });
             await pool.query(`INSERT INTO posted_products (product_id_unique, product_name) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [p.id, p.name]);
             count++;
-            console.log(`📢 Postado: ${p.name}`);
+            console.log(`📢 Postado: ${p.name} - ${priceFormatted}`);
             await new Promise(r => setTimeout(r, 4000));
         } catch (e) { console.error("Erro Telegram:", e); }
     }
