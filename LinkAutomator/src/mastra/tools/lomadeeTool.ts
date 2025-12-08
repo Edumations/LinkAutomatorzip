@@ -7,7 +7,7 @@ export const lomadeeTool = createTool({
   inputSchema: z.object({
     keyword: z.string(),
     limit: z.number().optional().default(3),
-    sort: z.string().optional().default("relevance"), // Mudamos o padrão para Relevância
+    sort: z.string().optional().default("relevance"),
     storeId: z.string().optional(),
   }),
   outputSchema: z.object({
@@ -26,17 +26,23 @@ export const lomadeeTool = createTool({
 
     if (!apiKey) return { products: [] };
 
-    // Função para limpar o preço (transforma "R$ 1.200,50" em 1200.50)
+    // --- CORREÇÃO DO PREÇO ---
     const parsePrice = (value: any): number => {
         if (typeof value === 'number') return value;
         if (!value) return 0;
-        let str = String(value).replace("R$", "").trim();
-        // Se tiver vírgula e ponto, assume formato BR (1.000,00)
+        
+        // Remove tudo que não é número, ponto ou vírgula
+        let str = String(value).replace(/[^\d.,]/g, "").trim();
+
+        // Lógica para Brasil (1.000,00) vs EUA (1,000.00)
         if (str.includes(",") && str.includes(".")) {
+            // Formato 1.234,50 -> Remove ponto, troca vírgula por ponto
             str = str.replace(/\./g, "").replace(",", ".");
         } else if (str.includes(",")) {
+            // Formato 1234,50 -> Troca vírgula por ponto
             str = str.replace(",", ".");
         }
+        
         return parseFloat(str) || 0;
     };
 
@@ -44,13 +50,13 @@ export const lomadeeTool = createTool({
       const params = new URLSearchParams({
         keyword: context.keyword,
         limit: String(context.limit || 3),
-        sort: context.sort || "relevance" // Força relevância para evitar produtos estranhos
+        sort: context.sort || "relevance"
       });
 
       if (sourceId) params.append("sourceId", sourceId);
       if (context.storeId) params.append("storeId", context.storeId);
 
-      console.log(`📡 [Lomadee] Buscando: ${context.keyword} (Loja ID: ${context.storeId || "Geral"})`);
+      console.log(`📡 [Lomadee] Buscando: ${context.keyword} (Loja: ${context.storeId || "Geral"})`);
 
       const res = await fetch(
           `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
@@ -60,18 +66,25 @@ export const lomadeeTool = createTool({
       if (!res.ok) return { products: [] };
 
       const data = await res.json();
+      const rawProducts = data.data || [];
 
-      const products = (data.data || []).map((item: any) => {
-        // Tenta achar o preço em qualquer lugar possível
+      // Mapeamento com Debug de Preço
+      const products = rawProducts.map((item: any) => {
+        // Tenta achar o preço em qualquer campo
         let finalPrice = parsePrice(item.price);
         if (finalPrice === 0) finalPrice = parsePrice(item.salePrice);
         if (finalPrice === 0) finalPrice = parsePrice(item.priceFrom);
-        if (finalPrice === 0) finalPrice = parsePrice(item.installment?.price);
+        if (finalPrice === 0 && item.installment) finalPrice = parsePrice(item.installment.price);
+
+        // Se ainda for zero, imprime no log para descobrirmos o motivo
+        if (finalPrice === 0) {
+             // console.log(`⚠️ Preço Zero no item: ${item.name} | Raw: ${JSON.stringify(item.price || item.salePrice)}`);
+        }
 
         return {
             id: String(item.id || item.productId),
             name: item.name || item.productName,
-            price: finalPrice, // Agora vai vir o número certo!
+            price: finalPrice,
             link: item.link || item.url,
             image: item.thumbnail || item.image || "",
             store: item.store?.name || item.storeName || "Lomadee"
