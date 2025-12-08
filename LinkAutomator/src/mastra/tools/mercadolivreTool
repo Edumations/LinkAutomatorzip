@@ -1,0 +1,46 @@
+import { createTool } from "@mastra/core/tools";
+import { z } from "zod";
+
+export const mercadolivreTool = createTool({
+  id: "mercadolivre-search",
+  description: "Busca produtos no Mercado Livre Brasil (MLB)",
+  inputSchema: z.object({
+    keyword: z.string().describe("O que você quer buscar (ex: Iphone, Geladeira)"),
+    limit: z.number().optional().default(5),
+  }),
+  outputSchema: z.object({
+    products: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      price: z.number(),
+      link: z.string(),
+      image: z.string(),
+      store: z.string(),
+    })),
+  }),
+  execute: async ({ context }) => {
+    try {
+      // API Pública do Mercado Livre (Não precisa de chave para buscar!)
+      const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(context.keyword)}&limit=${context.limit || 5}`;
+      
+      const res = await fetch(url);
+      const data = await res.json();
+      
+      const products = (data.results || []).map((item: any) => ({
+        id: item.id,
+        name: item.title,
+        price: item.price,
+        // O link vem limpo. Para monetizar, você precisará usar o construtor de links do ML depois
+        link: item.permalink, 
+        image: item.thumbnail.replace("http://", "https://").replace("-I.jpg", "-V.jpg"), // Melhora qualidade da imagem
+        store: "Mercado Livre" // ML não mostra nome da loja fácil na busca geral, então fixamos
+      }));
+
+      console.log(`🟡 [Mercado Livre] Encontrados: ${products.length} produtos.`);
+      return { products };
+    } catch (e) {
+      console.error("Erro Mercado Livre:", e);
+      return { products: [] };
+    }
+  }
+});
