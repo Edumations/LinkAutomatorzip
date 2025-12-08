@@ -6,7 +6,7 @@ import { lomadeeTool } from "../tools/lomadeeTool";
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// LISTA DE LOJAS PARA TENTAR (IDs da Lomadee)
+// LISTA DE LOJAS PARA TENTAR
 const STORES_TO_TRY = [
     { id: "5632", name: "Magalu" },
     { id: "5636", name: "Casas Bahia" },
@@ -14,13 +14,21 @@ const STORES_TO_TRY = [
     { id: "6116", name: "AliExpress" },
     { id: "5693", name: "Nike" },
     { id: "6373", name: "Girafa" },
-    { id: undefined, name: "Busca Geral (Fallback)" } // Sempre tenta essa por último
+    { id: undefined, name: "Busca Geral" } 
 ];
 
 async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
     const client = await pool.connect();
+    
+    // --- LIMPEZA DE BANCO ATIVADA (PARA DESTRAVAR POSTAGENS) ---
+    try {
+        await client.query('DELETE FROM posted_products');
+        console.log("💥 HISTÓRICO LIMPO! O bot vai repostar as ofertas da Magalu.");
+    } catch (e) { console.log("Erro ao limpar banco (pode estar vazio)."); }
+    // -----------------------------------------------------------
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
@@ -57,45 +65,41 @@ const fetchStep = createStep({
     console.log("🚀 [Passo 1] Iniciando Busca Lomadee...");
     const keyword = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
     
-    // Sorteia uma loja para tentar focar hoje
-    const targetStore = STORES_TO_TRY[Math.floor(Math.random() * (STORES_TO_TRY.length - 1))]; // Pega uma loja específica
-    console.log(`🔎 Tentando: "${keyword}" na loja: ${targetStore.name} (ID: ${targetStore.id})`);
+    // Sorteia uma loja
+    const targetStore = STORES_TO_TRY[Math.floor(Math.random() * STORES_TO_TRY.length)];
+    console.log(`🔎 Tentando: "${keyword}" na loja: ${targetStore.name} (ID: ${targetStore.id || "Geral"})`);
 
     let allProducts: Product[] = [];
 
-    // TENTATIVA 1: Loja Específica
     try {
+        // BUSCA 50 ITENS PARA TER VARIEDADE
         const res: any = await lomadeeTool.execute({ 
-            context: { keyword, limit: 3, sort: "discount", storeId: targetStore.id }, 
+            context: { keyword, limit: 50, sort: "discount", storeId: targetStore.id }, 
             mastra 
         });
         
         if (res?.products && res.products.length > 0) {
-            console.log(`✅ Sucesso na ${targetStore.name}: ${res.products.length} itens.`);
-            allProducts = res.products;
+            console.log(`✅ Sucesso na ${targetStore.name}: ${res.products.length} itens encontrados.`);
+            // Embaralha para pegar produtos diferentes dos primeiros
+            allProducts = res.products.sort(() => 0.5 - Math.random());
         } else {
             console.log(`⚠️ Falha na ${targetStore.name}. Tentando Busca Geral...`);
-            
-            // TENTATIVA 2: Busca Geral (Fallback)
             const resGeral: any = await lomadeeTool.execute({ 
-                context: { keyword, limit: 3, sort: "discount" }, // Sem storeId
+                context: { keyword, limit: 50, sort: "discount" }, 
                 mastra 
             });
-            
             if (resGeral?.products) {
-                console.log(`📦 Busca Geral trouxe: ${resGeral.products.length} itens (Provável Frio Peças).`);
-                allProducts = resGeral.products;
+                console.log(`📦 Busca Geral trouxe: ${resGeral.products.length} itens.`);
+                allProducts = resGeral.products.sort(() => 0.5 - Math.random());
             }
         }
     } catch (e) { console.error("Erro Lomadee:", e); }
 
-    // Formata o nome da loja se vier vazio
     const finalProducts = allProducts.map((p: any) => ({
         ...p,
         store: p.store || "Loja Parceira"
     }));
 
-    // Remove duplicatas
     const uniqueProducts = Array.from(new Map(finalProducts.map(item => [item.id, item])).values());
     console.log(`✅ TOTAL PARA FILTRO: ${uniqueProducts.length} produtos.`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
@@ -117,7 +121,10 @@ const filterStep = createStep({
         const res = await pool.query(`SELECT product_id_unique FROM posted_products WHERE product_id_unique IN (${placeholders})`, ids);
         const posted = new Set(res.rows.map((r: any) => r.product_id_unique));
         const newProducts = candidates.filter(p => !posted.has(p.id));
-        console.log(`✅ Filtrados: ${newProducts.length} novos.`);
+        
+        console.log(`✅ Filtrados: ${newProducts.length} produtos INÉDITOS.`);
+        
+        // Pega 3 produtos para postar
         return { success: true, newProducts: newProducts.slice(0, 3) };
     } catch (e) { return { success: false, newProducts: [] }; }
   }
