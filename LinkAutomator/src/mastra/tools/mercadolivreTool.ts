@@ -5,7 +5,7 @@ export const mercadolivreTool = createTool({
   id: "mercadolivre-search",
   description: "Busca produtos no Mercado Livre Brasil (MLB)",
   inputSchema: z.object({
-    keyword: z.string().describe("O que você quer buscar (ex: Iphone, Geladeira)"),
+    keyword: z.string(),
     limit: z.number().optional().default(3),
   }),
   outputSchema: z.object({
@@ -20,26 +20,33 @@ export const mercadolivreTool = createTool({
   }),
   execute: async ({ context }) => {
     try {
-      // Busca na API Pública do Mercado Livre
       const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(context.keyword)}&limit=${context.limit || 3}`;
       
+      console.log(`🟡 [ML Debug] Buscando: ${url}`);
       const res = await fetch(url);
+
+      if (!res.ok) {
+          console.error(`❌ [ML Erro] Status: ${res.status} - ${res.statusText}`);
+          return { products: [] };
+      }
+
       const data = await res.json();
       
-      // AQUI ESTAVA O ERRO: Removi o ": any" para evitar conflito de sintaxe
+      // Log para ver se o ML retornou resultados
+      console.log(`🟡 [ML Debug] Resultados brutos: ${data.results?.length || 0}`);
+
       const products = (data.results || []).map((item) => ({
         id: item.id,
         name: item.title,
         price: item.price,
-        link: item.permalink, // Link original do produto
-        // Melhora a qualidade da imagem trocando I (Thumb) por V (Maior) se possível, ou mantém original
+        link: item.permalink,
         image: item.thumbnail ? item.thumbnail.replace("http://", "https://").replace("-I.jpg", "-V.jpg") : "",
         store: "Mercado Livre"
       }));
 
       return { products };
     } catch (e) {
-      console.error("Erro na busca do Mercado Livre:", e);
+      console.error("❌ [ML Exception]", e);
       return { products: [] };
     }
   }
