@@ -15,6 +15,7 @@ import { promoPublisherAgent } from "./agents/promoPublisherAgent";
 import { promoPublisherWorkflow } from "./workflows/promoPublisherWorkflow";
 
 // Suas ferramentas
+import { mercadolivreTool } from "./tools/mercadolivreTool";
 import { lomadeeTool } from "./tools/lomadeeTool";
 import { telegramTool } from "./tools/telegramTool";
 import {
@@ -55,6 +56,7 @@ export const mastra = new Mastra({
       version: "1.0.0",
       tools: {
         lomadeeTool,
+        mercadolivreTool,
         telegramTool,
         checkPostedProductsTool,
         markProductAsPostedTool,
