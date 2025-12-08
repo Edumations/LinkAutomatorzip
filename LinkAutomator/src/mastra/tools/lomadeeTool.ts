@@ -20,10 +20,13 @@ export const lomadeeTool = createTool({
   description:
     "Fetches promotional products from Lomadee affiliate API. Use this to get the latest deals and offers from Brazilian e-commerce stores.",
 
+  // --- ALTERAÇÃO 1: Adicionamos storeId e sort aqui ---
   inputSchema: z.object({
     page: z.number().optional().default(1).describe("Page number for pagination"),
     limit: z.number().optional().default(20).describe("Number of products to fetch (max 100)"),
     keyword: z.string().optional().describe("Optional keyword to filter products"),
+    storeId: z.string().optional().describe("ID of the specific store (e.g., 5766 for Amazon, 5632 for Magalu)"),
+    sort: z.string().optional().default("relevance").describe("Sort order: relevance, price, rating"),
   }),
 
   outputSchema: z.object({
@@ -57,6 +60,16 @@ export const lomadeeTool = createTool({
 
       if (context.keyword) {
         params.append("keyword", context.keyword);
+      }
+
+      // --- ALTERAÇÃO 2: Passamos o ID da loja para a API ---
+      if (context.storeId) {
+        params.append("storeId", context.storeId);
+      }
+
+      // --- ALTERAÇÃO 3: Passamos a ordenação para variar os produtos ---
+      if (context.sort) {
+        params.append("sort", context.sort);
       }
 
       logger?.info("📡 [LomadeeTool] Calling Lomadee API", { params: params.toString() });
@@ -103,12 +116,23 @@ export const lomadeeTool = createTool({
         store: item.store || item.storeName || item.advertiser || "",
         category: item.category || item.categoryName || "",
       }));
-      // 🔴 COLE O CÓDIGO DE DIAGNÓSTICO AQUI 🔴
-console.log("========================================");
-console.log(`🔎 [DIAGNÓSTICO] A API da Lomadee retornou: ${products.length} produtos.`);
-if (products.length === 0) console.log("⚠️ Lista vazia! Verifique se a categoria tem ofertas hoje.");
-console.log("========================================");
-// 🔴 FIM DO CÓDIGO 🔴
+
+      // --- DIAGNÓSTICO MELHORADO ---
+      console.log("========================================");
+      console.log(`🔎 [DIAGNÓSTICO] Busca realizada!`);
+      if (context.storeId) console.log(`🏪 Loja Filtrada ID: ${context.storeId}`);
+      if (context.keyword) console.log(`🔑 Termo: ${context.keyword}`);
+      console.log(`📦 Produtos encontrados: ${products.length}`);
+      
+      if (products.length > 0) {
+        // Mostra de quais lojas vieram os produtos para conferir
+        const lojasEncontradas = [...new Set(products.map(p => p.store))];
+        console.log(`🏪 Lojas no resultado: ${lojasEncontradas.join(", ")}`);
+      } else {
+        console.log("⚠️ Lista vazia! Tente mudar a palavra-chave ou remover o filtro de loja.");
+      }
+      console.log("========================================");
+      // -----------------------------
 
       logger?.info("✅ [LomadeeTool] Products fetched successfully", { 
         count: products.length 
