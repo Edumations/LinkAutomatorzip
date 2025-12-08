@@ -82,100 +82,81 @@ function extractDeepData(item: any) {
   return { price, originalPrice, store, image };
 }
 
-// Passo 1: Busca Universal (Sem ID de loja)
+// Importe a ferramenta se necessário, ou use via mastra.getTool (recomendado no step)
+
+// ... (todo o código anterior de imports e setupDatabase continua igual) ...
+
+// Passo 1: Busca Híbrida (Lomadee + Mercado Livre)
 const fetchProductsStep = createStep({
-  id: "fetch-lomadee-products",
-  description: "Fetches products broadly",
+  id: "fetch-products-hybrid",
+  description: "Busca na Lomadee e Mercado Livre",
   inputSchema: z.object({}),
   outputSchema: z.object({
     success: z.boolean(),
     products: z.array(ProductSchema),
   }),
   execute: async ({ mastra }) => {
-    const apiKey = process.env.LOMADEE_API_KEY;
-    const sourceId = process.env.LOMADEE_SOURCE_ID;
+    console.log("🚀 Iniciando Busca Híbrida...");
     
-    if (!apiKey) return { success: false, products: [] };
-
-    const fetchAPI = async (params: URLSearchParams) => {
-      try {
-        if (sourceId) params.append("sourceId", sourceId);
-        
-        console.log(`📡 Tentando conectar na Lomadee com SourceID: ${sourceId || "SEM ID"}...`);
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-        const res = await fetch(
-          `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
-          { 
-            method: "GET", 
-            headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
-            signal: controller.signal
-          }
-        );
-        clearTimeout(timeoutId);
-        
-        if (!res.ok) {
-            // AQUI ESTÁ A MUDANÇA: Vamos ver o erro real!
-            const erroTexto = await res.text();
-            console.error(`❌ ERRO API LOMADEE (${res.status}): ${erroTexto}`);
-            return [];
-        }
-        
-        const data = await res.json();
-        return data.data || [];
-      } catch (e) { 
-        console.error("❌ ERRO DE CONEXÃO:", e);
-        return []; 
-      }
-    };
-
-    // Sorteia 3 categorias para buscar nesta rodada
-    const shuffled = [...KEYWORDS].sort(() => 0.5 - Math.random());
-    const targets = shuffled.slice(0, 3);
-    console.log(`🚀 [Busca] Categorias da vez: ${targets.join(", ")}`);
+    // Categorias para buscar
+    const KEYWORDS = ["Iphone", "Smart TV", "Notebook", "Air Fryer", "PlayStation 5"];
+    const keyword = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
+    console.log(`🔎 Palavra-chave da vez: ${keyword}`);
 
     let allProducts: Product[] = [];
 
-    for (const keyword of targets) {
-      // Busca sem storeId = Traz qualquer loja disponível
-      // Sort=discount tenta pegar as melhores promoções
-      const rawItems = await fetchAPI(new URLSearchParams({ 
-          keyword, 
-          sort: "discount", 
-          limit: "5" 
-      }));
-      
-      const parsedItems = rawItems.map((item: any) => {
-        const extracted = extractDeepData(item);
-        return {
-          id: String(item.id || item.productId || Math.random().toString(36)),
-          name: item.name || item.productName || "Oferta",
-          price: extracted.price,
-          originalPrice: extracted.originalPrice,
-          link: item.link || item.url || "",
-          image: extracted.image || "",
-          store: extracted.store || "Loja Parceira",
-          category: keyword,
-        };
-      });
+    // --- 1. TENTA LOMADEE ---
+    try {
+        const lomadeeTool = mastra?.getTool("lomadee-fetch-products"); // Nome que definimos na tool
+        if (lomadeeTool) {
+            const res: any = await lomadeeTool.execute({ 
+                context: { keyword, limit: 3, sort: "discount" },
+                mastra 
+            });
+            if (res?.products) {
+                allProducts.push(...res.products);
+                console.log(`📦 Lomadee trouxe: ${res.products.length}`);
+            }
+        }
+    } catch (e) { console.error("Erro Lomadee:", e); }
 
-      // Filtro de qualidade: Preço > R$ 20 e < R$ 15.000 (evita erros)
-      const validItems = parsedItems.filter(p => p.price > 20 && p.price < 15000);
-      allProducts.push(...validItems);
-      
-      // Pequena pausa para não sobrecarregar
-      await new Promise(r => setTimeout(r, 500));
-    }
+    // --- 2. TENTA MERCADO LIVRE ---
+    try {
+        const mlTool = mastra?.getTool("mercadolivre-search"); // Nome que definimos na tool nova
+        if (mlTool) {
+            const res: any = await mlTool.execute({ 
+                context: { keyword, limit: 3 },
+                mastra 
+            });
+            
+            if (res?.products) {
+                // Adaptar o formato do ML para o formato do nosso banco
+                const mlProducts = res.products.map((p: any) => ({
+                    id: `ML-${p.id}`, // Prefixo para não confundir IDs
+                    name: p.name,
+                    price: p.price,
+                    originalPrice: p.price * 1.1, // Fake original price (ML não entrega fácil na busca)
+                    link: p.link, // ⚠️ AQUI ENTRA O SEU LINK DE AFILIADO DEPOIS
+                    image: p.image,
+                    store: "Mercado Livre",
+                    category: keyword,
+                    generatedMessage: ""
+                }));
+                allProducts.push(...mlProducts);
+                console.log(`📦 Mercado Livre trouxe: ${mlProducts.length}`);
+            }
+        }
+    } catch (e) { console.error("Erro ML:", e); }
 
-    // Remove duplicatas
+    // Mistura tudo
     const uniqueProducts = Array.from(new Map(allProducts.map(item => [item.id, item])).values());
     
-    console.log(`📦 Encontrados: ${uniqueProducts.length} produtos (Lojas variadas).`);
+    console.log(`✅ TOTAL FINAL: ${uniqueProducts.length} produtos.`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
+
+// ... (O resto do workflow: filter, generateCopy e publish continua igual)
 
 // Passo 2: Filtro de Banco de Dados
 const filterNewProductsStep = createStep({
