@@ -26,25 +26,15 @@ export const lomadeeTool = createTool({
 
     if (!apiKey) return { products: [] };
 
-    // Conversor de preço SUPER agressivo
+    // Conversor de preço (Mantido, pois é bom)
     const parsePrice = (value: any): number => {
         if (!value) return 0;
         if (typeof value === 'number') return value;
-        
-        // Converte para string e limpa sujeira
         let str = String(value).trim();
-        
-        // Se vier como "R$ 1.200,50" -> Tira R$ e espaços
         str = str.replace(/[^\d.,]/g, ""); 
-
-        // Lógica Brasileira: Se tem vírgula no final (ex: 100,50 ou 1.000,00)
         if (str.includes(",")) {
-            // Remove pontos de milhar (1.000 -> 1000)
-            str = str.replace(/\./g, "");
-            // Troca vírgula decimal por ponto (1000,50 -> 1000.50)
-            str = str.replace(",", ".");
+            str = str.replace(/\./g, "").replace(",", ".");
         }
-        
         return parseFloat(str) || 0;
     };
 
@@ -71,29 +61,45 @@ export const lomadeeTool = createTool({
       const rawProducts = data.data || [];
 
       const products = rawProducts.map((item: any) => {
-        // TENTA ACHAR PREÇO EM TUDO QUE É LUGAR
-        let finalPrice = parsePrice(item.price);
-        
-        if (finalPrice === 0) finalPrice = parsePrice(item.salePrice);
-        if (finalPrice === 0) finalPrice = parsePrice(item.priceMin); // Comum em marketplaces
-        if (finalPrice === 0) finalPrice = parsePrice(item.priceMax);
-        if (finalPrice === 0 && item.installment) finalPrice = parsePrice(item.installment.price);
+        let finalPrice = 0;
 
-        // --- DIAGNÓSTICO DE ERRO ---
-        // Se ainda for zero, imprime o item bruto para descobrirmos o problema
-        if (finalPrice === 0) {
-             console.log("🚨 [DEBUG] ITEM COM PREÇO ZERO ENCONTRADO:");
-             console.log(JSON.stringify(item, null, 2)); // Mostra o JSON puro
+        // 1. Tenta pegar do padrão (root)
+        finalPrice = parsePrice(item.price) || parsePrice(item.salePrice) || parsePrice(item.priceMin) || parsePrice(item.priceMax);
+
+        // 2. CORREÇÃO CRÍTICA: Tenta pegar de dentro de "options" -> "pricing"
+        // O JSON do log mostrou que é aqui que o preço real está!
+        if (finalPrice === 0 && item.options && item.options.length > 0) {
+            const option = item.options[0]; // Pega a primeira opção
+            
+            // Verifica se tem preço direto na opção
+            if (option.price) finalPrice = parsePrice(option.price);
+
+            // Verifica se tem array de pricing (O caso do seu log)
+            if (finalPrice === 0 && option.pricing && option.pricing.length > 0) {
+                const priceObj = option.pricing[0];
+                finalPrice = parsePrice(priceObj.price) || parsePrice(priceObj.salePrice) || parsePrice(priceObj.listPrice);
+            }
         }
-        // ---------------------------
+
+        // Tenta pegar imagem da opção se a principal falhar
+        let finalImage = item.thumbnail || item.image;
+        if (!finalImage && item.options && item.options.length > 0) {
+            const imgObj = item.options[0].images ? item.options[0].images[0] : null;
+            if (imgObj) finalImage = imgObj.url || imgObj.large || imgObj.medium; 
+        }
+
+        // Diagnóstico final (só imprime se falhar mesmo depois de tudo isso)
+        if (finalPrice === 0) {
+             console.log(`🚨 [DEBUG] ITEM AINDA ZERO: ${item.name}`);
+        }
 
         return {
             id: String(item.id || item.productId),
             name: item.name || item.productName,
             price: finalPrice,
             link: item.link || item.url,
-            image: item.thumbnail || item.image || "",
-            store: item.store?.name || item.storeName || "Lomadee"
+            image: finalImage || "",
+            store: item.store?.name || item.storeName || item.options?.[0]?.seller || "Lomadee"
         };
       });
 
