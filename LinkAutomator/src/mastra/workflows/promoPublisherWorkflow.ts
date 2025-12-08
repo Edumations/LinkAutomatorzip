@@ -16,11 +16,7 @@ async function setupDatabase() {
   try {
     const client = await pool.connect();
     
-    // --- CORREÇÃO DO ERRO ---
-    // Apaga a tabela antiga para recriar com a coluna "product_id_unique" correta
-    // await client.query(`DROP TABLE IF EXISTS posted_products`);
-    // ------------------------
-
+    // Cria tabela se não existir
     await client.query(`
       CREATE TABLE IF NOT EXISTS posted_products (
         id SERIAL PRIMARY KEY,
@@ -48,8 +44,36 @@ const ProductSchema = z.object({
 
 type Product = z.infer<typeof ProductSchema>;
 
+// --- LISTA CORRIGIDA (SEM ASPAS QUEBRADAS) ---
 const KEYWORDS = [
-"Smartphone Android", "iPhone", "Tablet 10"", "Notebook gamer", "Notebook ultrafino", "Smartwatch", "Pulseira inteligente", "Monitor 27"", "Teclado mecânico", "Mouse gamer", "Mouse sem fio", "Headset Bluetooth", "Caixa de som portátil", "TV 4K", "TV 8K", "Chromecast", "Fire TV Stick", "Roteador Wi-Fi 6", "SSD NVMe", "HD externo", "Pendrive 128GB", "Placa de vídeo", "Processador Intel", "Processador AMD", "Memória RAM 16GB", "Fonte de alimentação", "Gabinete gamer", "Webcam Full HD", "Impressora", "Scanner", "Microfone condensador", "Ring light", "Tripé extensível", "Drone recreativo", "Drone profissional", "Câmera DSLR", "Câmera mirrorless", "Lente 50mm", "Lente telefoto", "Cartão SD 128GB", "Console PlayStation", "Console Xbox", "Console Nintendo Switch", "Controle sem fio", "Volante gamer", "Jogo de tabuleiro", "Jogo de cartas", "Livro físico", "E-book reader", "Caderno universitário", "Caneta esferográfica", "Caneta gel", "Marca-texto", "Mochila", "Estojo", "Agenda", "Calculadora científica", "Papel sulfite", "Garrafa térmica", "Copo térmico", "Liquidificador", "Airfryer", "Fogão", "Geladeira", "Micro-ondas", "Cafeteira", "Torradeira", "Mixer", "Ferro de passar", "Aspirador de pó", "Lavadora de roupas", "Secadora", "Ventilador", "Ar-condicionado", "Purificador de ar", "Fone de ouvido", "Tênis esportivo", "Chinelo", "Sandália feminina", "Calça jeans", "Blusa social", "Camiseta básica", "Moletom", "Jaqueta", "Bermuda", "Vestido", "Saia", "Boné", "Relógio de pulso", "Pulseira de couro", "Óculos de sol", "Colar", "Anel", "Brinco", "Shampoo", "Condicionador", "Sabonete líquido", "Hidratante corporal", "Perfume masculino", "Perfume feminino", "Desodorante", "Escova de dente elétrica", "Creme dental", "Protetor solar", "Protetor labial", "Ração para cachorro", "Ração para gato", "Areia sanitária", "Brinquedo para pet", "Coleira", "Comedouro", "Bebedouro automático", "Suplemento vitamínico", "Barra de proteína", "Whey protein", "Creatina", "Pré-treino", "Tênis de corrida", "Bola de futebol", "Bola de vôlei", "Bicicleta", "Capacete", "Trava de bike", "Skate", "Patins in-line", "Mochila de hidratação", "Tenda de camping", "Saco de dormir", "Lanterna LED", "Fogareiro portátil"
+  "Smartphone Android", "iPhone", "Tablet 10", "Notebook gamer", "Notebook ultrafino", 
+  "Smartwatch", "Pulseira inteligente", "Monitor 27", "Teclado mecânico", "Mouse gamer", 
+  "Mouse sem fio", "Headset Bluetooth", "Caixa de som portátil", "TV 4K", "TV 8K", 
+  "Chromecast", "Fire TV Stick", "Roteador Wi-Fi 6", "SSD NVMe", "HD externo", 
+  "Pendrive 128GB", "Placa de vídeo", "Processador Intel", "Processador AMD", 
+  "Memória RAM 16GB", "Fonte de alimentação", "Gabinete gamer", "Webcam Full HD", 
+  "Impressora", "Scanner", "Microfone condensador", "Ring light", "Tripé extensível", 
+  "Drone recreativo", "Drone profissional", "Câmera DSLR", "Câmera mirrorless", 
+  "Lente 50mm", "Lente telefoto", "Cartão SD 128GB", "Console PlayStation", 
+  "Console Xbox", "Console Nintendo Switch", "Controle sem fio", "Volante gamer", 
+  "Jogo de tabuleiro", "Jogo de cartas", "Livro físico", "E-book reader", 
+  "Caderno universitário", "Caneta esferográfica", "Caneta gel", "Marca-texto", 
+  "Mochila", "Estojo", "Agenda", "Calculadora científica", "Papel sulfite", 
+  "Garrafa térmica", "Copo térmico", "Liquidificador", "Airfryer", "Fogão", 
+  "Geladeira", "Micro-ondas", "Cafeteira", "Torradeira", "Mixer", "Ferro de passar", 
+  "Aspirador de pó", "Lavadora de roupas", "Secadora", "Ventilador", "Ar-condicionado", 
+  "Purificador de ar", "Fone de ouvido", "Tênis esportivo", "Chinelo", "Sandália feminina", 
+  "Calça jeans", "Blusa social", "Camiseta básica", "Moletom", "Jaqueta", "Bermuda", 
+  "Vestido", "Saia", "Boné", "Relógio de pulso", "Pulseira de couro", "Óculos de sol", 
+  "Colar", "Anel", "Brinco", "Shampoo", "Condicionador", "Sabonete líquido", 
+  "Hidratante corporal", "Perfume masculino", "Perfume feminino", "Desodorante", 
+  "Escova de dente elétrica", "Creme dental", "Protetor solar", "Protetor labial", 
+  "Ração para cachorro", "Ração para gato", "Areia sanitária", "Brinquedo para pet", 
+  "Coleira", "Comedouro", "Bebedouro automático", "Suplemento vitamínico", 
+  "Barra de proteína", "Whey protein", "Creatina", "Pré-treino", "Tênis de corrida", 
+  "Bola de futebol", "Bola de vôlei", "Bicicleta", "Capacete", "Trava de bike", 
+  "Skate", "Patins in-line", "Mochila de hidratação", "Tenda de camping", 
+  "Saco de dormir", "Lanterna LED", "Fogareiro portátil"
 ];
 
 // Passo 1: Busca Híbrida
@@ -67,6 +91,7 @@ const fetchHybridStep = createStep({
 
     // --- 1. TENTA LOMADEE ---
     try {
+        // Chamada direta da tool importada
         const res: any = await lomadeeTool.execute({ 
             context: { keyword, limit: 3, sort: "discount" },
             mastra 
@@ -85,6 +110,7 @@ const fetchHybridStep = createStep({
 
     // --- 2. TENTA MERCADO LIVRE ---
     try {
+        // Chamada direta da tool importada
         const res: any = await mercadolivreTool.execute({ 
             context: { keyword, limit: 3 },
             mastra 
