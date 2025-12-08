@@ -23,7 +23,14 @@ export const mercadolivreTool = createTool({
       const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(context.keyword)}&limit=${context.limit || 3}`;
       
       console.log(`🟡 [ML Debug] Buscando: ${url}`);
-      const res = await fetch(url);
+      
+      // ADICIONAMOS O CABEÇALHO PARA FINGIR SER UM NAVEGADOR
+      const res = await fetch(url, {
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "application/json"
+        }
+      });
 
       if (!res.ok) {
           console.error(`❌ [ML Erro] Status: ${res.status} - ${res.statusText}`);
@@ -31,8 +38,6 @@ export const mercadolivreTool = createTool({
       }
 
       const data = await res.json();
-      
-      // Log para ver se o ML retornou resultados
       console.log(`🟡 [ML Debug] Resultados brutos: ${data.results?.length || 0}`);
 
       const products = (data.results || []).map((item) => ({
