@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const lomadeeTool = createTool({
   id: "lomadee-fetch-products",
-  description: "Busca produtos com Seletor Inteligente de Array (Context Match)",
+  description: "Busca produtos com Filtro de Relevância Estrito (Zero Tolerância)",
   inputSchema: z.object({
     keyword: z.string(),
     limit: z.number().optional().default(12),
@@ -29,7 +29,6 @@ export const lomadeeTool = createTool({
         return { products: [] };
     }
 
-    // --- HELPER: Limpeza e Normalização ---
     const cleanPrice = (val: any): number => {
         if (typeof val === 'number') return val;
         if (!val) return 0;
@@ -44,11 +43,11 @@ export const lomadeeTool = createTool({
 
     const normalize = (str: string) => str.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-    // --- HELPER: Encontra Valor Recursivo ---
+    // Busca recursiva de valores (preço, nome, link)
     const findValueRecursively = (obj: any, keys: string[]): any => {
         if (!obj || typeof obj !== 'object') return null;
         for (const key of keys) {
-            if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "" && obj[key] !== 0) {
+            if (obj[key]) {
                 if (keys.includes('price') || keys.includes('value')) {
                     const val = cleanPrice(obj[key]);
                     if (val > 0) return val;
@@ -70,46 +69,44 @@ export const lomadeeTool = createTool({
         return null;
     };
 
-    // --- SELETOR INTELIGENTE DE ARRAY ---
-    // Em vez de pegar o primeiro array, pega o que tem mais a ver com a busca
+    // --- SELETOR ESTRITO (CORRIGIDO) ---
     const findBestProductsArray = (obj: any, keyword: string): any[] => {
         let bestArray: any[] = [];
-        let maxScore = -1;
+        let maxScore = 0; // Começa em 0. Se ninguém pontuar, retorna vazio.
+        
+        // Termos obrigatórios (remove palavras curtas como "de", "com")
         const searchTerms = normalize(keyword).split(" ").filter(w => w.length > 2);
 
         const scan = (node: any) => {
             if (!node) return;
             
-            // Se achou um array, avalia ele
             if (Array.isArray(node)) {
                 if (node.length > 0) {
                     let currentScore = 0;
-                    // Amostra os primeiros 5 itens para pontuar
-                    const sample = node.slice(0, 5); 
+                    // Analisa amostra para performance
+                    const sample = node.slice(0, 10); 
                     
                     for (const item of sample) {
-                        // Tenta achar o nome
                         const name = findValueRecursively(item, ['name', 'productName', 'linkName']);
                         if (name && typeof name === 'string') {
                             const normName = normalize(name);
-                            // Pontua se contiver termos da busca
+                            // Pontua +1 para cada termo da busca encontrado no nome
                             searchTerms.forEach(term => {
                                 if (normName.includes(term)) currentScore++;
                             });
                         }
                     }
 
-                    // Se esse array é mais relevante que o anterior, guarda ele
-                    // Prioriza arrays maiores também (desempate)
-                    if (currentScore > maxScore || (currentScore === maxScore && node.length > bestArray.length)) {
+                    // SÓ aceita se tiver alguma pontuação (relevância > 0)
+                    // E se for melhor que o anterior
+                    if (currentScore > maxScore) {
                         maxScore = currentScore;
                         bestArray = node;
                     }
                 }
-                return; // Não entra em arrays dentro de arrays para não confundir
+                return;
             }
 
-            // Se é objeto, continua descendo
             if (typeof node === 'object') {
                 for (const key of Object.keys(node)) {
                     scan(node[key]);
@@ -119,10 +116,10 @@ export const lomadeeTool = createTool({
 
         scan(obj);
         
-        // Fallback: Se nenhum array teve pontuação (score 0), retorna o maior array encontrado
-        // (Isso acontece se a busca for muito específica e os nomes não baterem exato, mas a API retornou algo)
-        if (maxScore === 0 && bestArray.length === 0) {
-             // scan de novo mas só por tamanho (simplificado aqui para não duplicar código, o scan original já pega o maior se score for 0)
+        if (bestArray.length === 0) {
+            // console.log(`   ⚠️ Nenhum array relevante encontrado para "${keyword}"`);
+        } else {
+            // console.log(`   🎯 Array selecionado com score ${maxScore}`);
         }
         
         return bestArray;
@@ -154,7 +151,7 @@ export const lomadeeTool = createTool({
 
       if (!rawData) return { products: [] };
 
-      // USA O SELETOR INTELIGENTE
+      // Agora o seletor retorna VAZIO se só tiver lixo
       const rawProducts = findBestProductsArray(rawData, context.keyword);
 
       if (rawProducts.length === 0) return { products: [] };
@@ -181,12 +178,8 @@ export const lomadeeTool = createTool({
         };
       });
 
+      // Filtro final de sanidade
       const validProducts = products.filter((p: any) => p.price > 0 && p.link !== "");
-      
-      // Log de validação
-      if (validProducts.length > 0) {
-          console.log(`✅ [Lomadee] Achou ${validProducts.length} itens. Primeiro: "${validProducts[0].name}"`);
-      }
 
       return { products: validProducts };
 
