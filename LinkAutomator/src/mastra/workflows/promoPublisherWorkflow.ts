@@ -6,14 +6,14 @@ import { lomadeeTool } from "../tools/lomadeeTool";
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// --- LISTAS ESTRATÉGICAS ---
 const KEYWORDS = [
-  "iPhone 15", "iPhone 13", "Samsung Galaxy S24", "Samsung Galaxy M55", "Xiaomi Redmi 13", "Motorola Edge", 
-  "Notebook Dell Inspiron", "Notebook Acer Nitro", "MacBook Air M1", "Monitor Gamer 144hz", 
-  "Teclado Redragon", "Mouse Logitech G", "Headset HyperX", "PlayStation 5 Slim", "Xbox Series S", "Nintendo Switch Oled",
-  "Smart TV 50 4K", "Smart TV 43", "Alexa Echo Pop", "Kindle Paperwhite",
-  "Cadeira Gamer", "Airfryer Mondial", "Airfryer Philips", "Geladeira Frost Free", "Ventilador de Mesa", "Máquina de Lavar",
-  "Tênis Nike Air", "Tênis Adidas", "Whey Protein Max", "Creatina"
+  "iPhone 15", "iPhone 13", "Samsung Galaxy S24", "Samsung Galaxy A55", "Xiaomi Redmi Note", 
+  "Notebook Dell", "Notebook Lenovo", "MacBook Air", "Monitor Gamer", 
+  "Teclado Redragon", "Mouse Logitech", "Headset HyperX", 
+  "PlayStation 5", "Xbox Series S", "Nintendo Switch",
+  "Smart TV 50", "Smart TV 43", "Alexa Echo Dot", "Kindle",
+  "Cadeira Gamer", "Airfryer Mondial", "Geladeira Frost Free", "Ventilador", "Máquina de Lavar",
+  "Tênis Nike", "Tênis Adidas", "Whey Protein", "Creatina"
 ];
 
 const STORES_TO_TRY = [
@@ -21,11 +21,9 @@ const STORES_TO_TRY = [
     { id: "5766", name: "Amazon" },
     { id: "5632", name: "Magalu" },
     { id: "6116", name: "AliExpress" },
-    { id: "5938", name: "KaBuM!" },
-    { id: "5636", name: "Casas Bahia" }
+    { id: "5938", name: "KaBuM!" }
 ];
 
-// Setup Banco de Dados
 async function setupDatabase() {
   if (!process.env.DATABASE_URL) return;
   try {
@@ -37,8 +35,6 @@ async function setupDatabase() {
         product_name TEXT,
         posted_at TIMESTAMP DEFAULT NOW()
       );
-      CREATE INDEX IF NOT EXISTS idx_prod_posted_at ON posted_products(posted_at);
-      CREATE INDEX IF NOT EXISTS idx_prod_unique_id ON posted_products(product_id_unique);
     `);
     client.release();
   } catch (err) { console.error("❌ Erro DB Setup:", err); }
@@ -50,7 +46,17 @@ const ProductSchema = z.object({
 });
 type Product = z.infer<typeof ProductSchema>;
 
-// --- PASSO 1: BUSCA DE ALTO VOLUME (AUTO-RETRY) ---
+// --- FUNÇÃO DE VALIDAÇÃO DE NOME ---
+const isProductRelevant = (productName: string, keyword: string): boolean => {
+    const normName = productName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const searchTerms = keyword.toLowerCase().split(" ").filter(w => w.length > 2);
+    
+    // Regra: Pelo menos UM dos termos principais deve estar no nome
+    // Ex: Busca "iPhone 15". Produto "Capa para iPhone". Passa (relevante, mas pode ser acessório).
+    // Ex: Busca "iPhone 15". Produto "Geladeira". Não passa.
+    return searchTerms.some(term => normName.includes(term));
+};
+
 const fetchStep = createStep({
   id: "fetch-lomadee",
   inputSchema: z.object({}),
@@ -59,12 +65,11 @@ const fetchStep = createStep({
     let attempts = 0;
     let allProducts: Product[] = [];
     
-    // Tenta buscar até conseguir produtos ou estourar 2 tentativas (Anti-Zero)
-    while (allProducts.length < 5 && attempts < 2) {
+    // Tenta até achar 3 produtos válidos ou rodar 2 ciclos
+    while (allProducts.length < 3 && attempts < 2) {
         attempts++;
         const selectedKeywords: string[] = [];
-        // Pega 3 palavras aleatórias
-        while (selectedKeywords.length < 3) {
+        while (selectedKeywords.length < 2) {
             const k = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
             if (!selectedKeywords.includes(k)) selectedKeywords.push(k);
         }
@@ -72,39 +77,47 @@ const fetchStep = createStep({
         console.log(`🚀 [Job] Busca (Tentativa ${attempts}): ${selectedKeywords.join(" | ")}`);
 
         for (const keyword of selectedKeywords) {
-            // Escolhe 2 lojas por palavra para não demorar demais
             const stores = [STORES_TO_TRY[0], STORES_TO_TRY[Math.floor(Math.random() * (STORES_TO_TRY.length - 1)) + 1]];
             
             for (const store of stores) {
                 try {
-                    await new Promise(r => setTimeout(r, 1000)); // Delay de cortesia
+                    await new Promise(r => setTimeout(r, 1000));
                     
                     const res: any = await lomadeeTool.execute({ 
-                        // AUMENTO DE VOLUME: Limit 25
-                        context: { keyword, limit: 25, sort: "relevance", storeId: store.id }, 
+                        context: { keyword, limit: 15, sort: "relevance", storeId: store.id }, 
                         mastra 
                     });
                     
                     if (res?.products?.length) {
-                        const valid = res.products.filter((p: any) => p.price > 20); // Filtra erros de preço
-                        allProducts.push(...valid);
+                        // --- FILTRO DE TRAVA DE SEGURANÇA ---
+                        const valid = res.products.filter((p: any) => {
+                            const isRelevant = isProductRelevant(p.name, keyword);
+                            const isValidPrice = p.price > 15;
+                            return isRelevant && isValidPrice;
+                        });
+
+                        if (valid.length > 0) {
+                            allProducts.push(...valid);
+                            // console.log(`   ✅ [${store.name}] ${valid.length} itens confirmados para "${keyword}"`);
+                        } else {
+                            // Se filtrou tudo, é porque a API retornou lixo.
+                            // console.log(`   🗑️ [${store.name}] Retornou ${res.products.length} itens irrelevantes para "${keyword}". Ignorados.`);
+                        }
                     }
                 } catch (e) {}
             }
         }
     }
 
-    // Deduplicação por ID
     const uniqueMap = new Map();
     allProducts.forEach(p => uniqueMap.set(p.id, p));
     const uniqueProducts = Array.from(uniqueMap.values());
 
-    console.log(`✅ [Job] Total Candidatos Brutos: ${uniqueProducts.length}`);
+    console.log(`✅ [Job] Total Candidatos Aprovados: ${uniqueProducts.length}`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
 
-// --- PASSO 2: FILTRAGEM INTELIGENTE ---
 const filterStep = createStep({
   id: "filter-products",
   inputSchema: z.object({ success: z.boolean(), products: z.array(ProductSchema) }),
@@ -112,16 +125,15 @@ const filterStep = createStep({
   execute: async ({ inputData }) => {
     if (!inputData.success || !inputData.products.length) return { success: false, newProducts: [] };
     
-    // Embaralha para variar o conteúdo
     const candidates = inputData.products.sort(() => 0.5 - Math.random());
     const finalSelection: Product[] = [];
     const client = await pool.connect();
 
     try {
         for (const p of candidates) {
-            if (finalSelection.length >= 5) break; // Posta até 5 ofertas por ciclo
+            if (finalSelection.length >= 4) break; 
 
-            // Regra: Não repetir o MESMO produto nos últimos 3 dias
+            // Repostagem permitida a cada 3 dias
             const res = await client.query(
                 `SELECT 1 FROM posted_products WHERE product_id_unique = $1 AND posted_at > NOW() - INTERVAL '3 days'`,
                 [p.id]
@@ -131,17 +143,16 @@ const filterStep = createStep({
         }
     } finally { client.release(); }
 
-    if (finalSelection.length === 0) {
-        console.log("⚠️ [Job] Todos os itens encontrados já foram postados recentemente.");
+    if (finalSelection.length > 0) {
+        console.log(`✨ [Job] ${finalSelection.length} ofertas inéditas para postar.`);
     } else {
-        console.log(`✨ [Job] ${finalSelection.length} ofertas inéditas aprovadas.`);
+        console.log("⏸️ [Job] Produtos encontrados, mas já postados recentemente.");
     }
-    
+
     return { success: finalSelection.length > 0, newProducts: finalSelection };
   }
 });
 
-// --- PASSO 3: COPYWRITING ---
 const copyStep = createStep({
   id: "generate-copy",
   inputSchema: z.object({ success: z.boolean(), newProducts: z.array(ProductSchema) }),
@@ -153,8 +164,7 @@ const copyStep = createStep({
 
     await Promise.all(enrichedProducts.map(async (p) => {
         const price = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
-        // Prompt direto e vendedor
-        const prompt = `Post Telegram Oferta. Produto: ${p.name}. Loja: ${p.store}. Preço: ${price}. Link: ${p.link}. Urgência! Emojis!`;
+        const prompt = `Post Telegram Venda. Produto: ${p.name}. Loja: ${p.store}. Preço: ${price}. Link: ${p.link}. Emojis!`;
         try {
             const res = await agent?.generateLegacy([{ role: "user", content: prompt }]);
             p.generatedMessage = res?.text || "";
@@ -164,7 +174,6 @@ const copyStep = createStep({
   }
 });
 
-// --- PASSO 4: PUBLICAÇÃO BLINDADA (Retry System) ---
 const publishStep = createStep({
   id: "publish",
   inputSchema: z.object({ success: z.boolean(), enrichedProducts: z.array(ProductSchema) }),
@@ -175,52 +184,40 @@ const publishStep = createStep({
     const chat = process.env.TELEGRAM_CHANNEL_ID;
     let count = 0;
 
-    // Função de Retry para rede instável
     const fetchWithRetry = async (url: string, opts: any, retries = 3) => {
         for (let i = 0; i < retries; i++) {
             try {
                 const res = await fetch(url, opts);
-                if (!res.ok) {
-                    const txt = await res.text();
-                    // Se for erro 429 (Too Many Requests), espera mais
-                    if (res.status === 429) await new Promise(r => setTimeout(r, 10000));
-                    throw new Error(`Status ${res.status}: ${txt}`);
-                }
+                if (!res.ok) throw new Error(res.statusText);
                 return res;
             } catch (err) {
                 if (i === retries - 1) throw err;
-                console.log(`⚠️ [Telegram] Falha na tentativa ${i + 1}. Retentando...`);
-                await new Promise(r => setTimeout(r, 2000 * (i + 1))); // Backoff exponencial
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
     };
 
     for (const p of inputData.enrichedProducts) {
-        if (!token || !chat) { console.error("❌ Sem credenciais Telegram"); break; }
-
+        if (!token || !chat) break;
         const priceFormatted = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
         let text = p.generatedMessage || `🔥 ${p.name}\n💰 ${priceFormatted}`;
         const body: any = { 
             chat_id: chat, parse_mode: "Markdown", 
-            text: `${text}\n\n👇 *COMPRE AGORA:*\n${p.link}`,
+            text: `${text}\n\n👇 *OFERTA:* ${p.link}`,
             reply_markup: { inline_keyboard: [[{ text: "🛒 IR PARA A LOJA", url: p.link }]] }
         };
         if (p.image) { body.photo = p.image; body.caption = body.text; delete body.text; }
 
         try {
-            const endpoint = p.image ? "sendPhoto" : "sendMessage";
             await fetchWithRetry(
-                `https://api.telegram.org/bot${token}/${endpoint}`, 
+                `https://api.telegram.org/bot${token}/${p.image ? "sendPhoto" : "sendMessage"}`, 
                 { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
             );
-            
             await pool.query(`INSERT INTO posted_products (product_id_unique, product_name) VALUES ($1, $2)`, [p.id, p.name]);
             count++;
             console.log(`📢 Postado: ${p.name}`);
-            await new Promise(r => setTimeout(r, 5000)); // Delay entre posts
-        } catch (e) { 
-            console.error(`❌ Erro Telegram Final para ${p.name}:`, e); 
-        }
+            await new Promise(r => setTimeout(r, 5000));
+        } catch (e) { console.error(`❌ Erro Telegram ${p.name}:`, e); }
     }
     return { success: true, count };
   }
