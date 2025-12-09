@@ -6,14 +6,17 @@ import { lomadeeTool } from "../tools/lomadeeTool";
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// LISTA CURADA (Termos genéricos funcionam melhor que específicos)
-const KEYWORDS = [
-  "Smartphone", "iPhone", "Samsung Galaxy", "Motorola", 
-  "Notebook", "Monitor", "Teclado Gamer", "Mouse", "Headset", 
-  "Smart TV", "Alexa", "Kindle",
-  "PlayStation", "Xbox", "Nintendo Switch",
-  "Cadeira Gamer", "Airfryer", "Geladeira", "Ventilador", "Lavadora",
-  "Tênis Nike", "Tênis Adidas", "Whey Protein"
+// --- DICIONÁRIO DE BUSCA EM CASCATA ---
+// Estrutura: { termo_principal: [tentativa1, tentativa2, tentativa3] }
+const SEARCH_GROUPS = [
+    ["iPhone 15", "iPhone 14", "iPhone", "Smartphone Apple"],
+    ["Samsung Galaxy S24", "Samsung Galaxy S23", "Samsung Galaxy", "Smartphone Samsung"],
+    ["PlayStation 5", "Console PlayStation", "Controle PS5", "Games"],
+    ["Notebook Gamer Dell", "Notebook Dell", "Notebook i5", "Notebook"],
+    ["Airfryer Mondial", "Airfryer", "Fritadeira", "Eletroportáteis"],
+    ["Smart TV 50 4K", "Smart TV Samsung", "Smart TV", "TV"],
+    ["Alexa Echo Pop", "Echo Dot", "Alexa", "Smart Speaker"],
+    ["Tênis Nike Running", "Tênis Nike", "Tênis Corrida", "Tênis"]
 ];
 
 const STORES_TO_TRY = [
@@ -35,7 +38,7 @@ async function setupDatabase() {
         product_name TEXT,
         posted_at TIMESTAMP DEFAULT NOW()
       );
-      CREATE INDEX IF NOT EXISTS idx_posted_at ON posted_products(posted_at);
+      CREATE INDEX IF NOT EXISTS idx_posted_time ON posted_products(posted_at);
     `);
     client.release();
   } catch (err) { console.error("❌ Erro DB Setup:", err); }
@@ -47,65 +50,65 @@ const ProductSchema = z.object({
 });
 type Product = z.infer<typeof ProductSchema>;
 
-// --- PASSO 1: BUSCA INSISTENTE ---
+// --- PASSO 1: BUSCA CASCATA ---
 const fetchStep = createStep({
   id: "fetch-lomadee",
   inputSchema: z.object({}),
   outputSchema: z.object({ success: z.boolean(), products: z.array(ProductSchema) }),
   execute: async ({ mastra }) => {
-    let attempts = 0;
     let allProducts: Product[] = [];
     
-    // Continua tentando até achar 3 produtos ou falhar 3 vezes (Total de 6-9 buscas)
-    while (allProducts.length < 3 && attempts < 3) {
-        attempts++;
-        const selectedKeywords: string[] = [];
-        // Seleciona 2 palavras aleatórias
-        while (selectedKeywords.length < 2) {
-            const k = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
-            if (!selectedKeywords.includes(k)) selectedKeywords.push(k);
-        }
+    // Escolhe um grupo de busca aleatório (ex: Grupo do iPhone)
+    const searchGroup = SEARCH_GROUPS[Math.floor(Math.random() * SEARCH_GROUPS.length)];
+    
+    console.log(`🚀 [Job] Iniciando Cascata para grupo: "${searchGroup[0]}"`);
 
-        console.log(`🚀 [Job] Ciclo ${attempts}: Buscando "${selectedKeywords.join('" e "')}"...`);
+    // Tenta cada termo da cascata até achar produtos
+    for (const keyword of searchGroup) {
+        if (allProducts.length >= 3) break; // Já achou o suficiente
 
-        for (const keyword of selectedKeywords) {
-            // Tenta na busca Geral e em +1 loja
-            const stores = [STORES_TO_TRY[0], STORES_TO_TRY[Math.floor(Math.random() * (STORES_TO_TRY.length - 1)) + 1]];
-            
-            for (const store of stores) {
-                try {
-                    await new Promise(r => setTimeout(r, 1000));
+        console.log(`   🔎 Tentando termo: "${keyword}"...`);
+        
+        // Tenta Geral + 1 Loja Específica
+        const stores = [STORES_TO_TRY[0], STORES_TO_TRY[Math.floor(Math.random() * (STORES_TO_TRY.length - 1)) + 1]];
+        
+        for (const store of stores) {
+            try {
+                await new Promise(r => setTimeout(r, 1200)); // Delay
+                
+                const res: any = await lomadeeTool.execute({ 
+                    context: { keyword, limit: 15, sort: "relevance", storeId: store.id }, 
+                    mastra 
+                });
+                
+                if (res?.products?.length) {
+                    // Validação: Nome deve conter pelo menos uma palavra chave importante
+                    // Ex: Se buscou "iPhone 15", aceita "iPhone" no nome.
+                    const keyTerms = keyword.toLowerCase().split(" ").filter(w => w.length > 2);
                     
-                    const res: any = await lomadeeTool.execute({ 
-                        context: { keyword, limit: 15, sort: "relevance", storeId: store.id }, 
-                        mastra 
+                    const valid = res.products.filter((p: any) => {
+                        const normName = p.name.toLowerCase();
+                        return keyTerms.some(t => normName.includes(t)) && p.price > 20;
                     });
-                    
-                    if (res?.products?.length) {
-                        // Validação Extra: O nome DEVE conter parte da keyword
-                        const normKey = keyword.toLowerCase().split(" ")[0]; // Pega a primeira palavra (ex: "PlayStation" de "PlayStation 5")
-                        
-                        const valid = res.products.filter((p: any) => {
-                            const normName = p.name.toLowerCase();
-                            return normName.includes(normKey) && p.price > 15;
-                        });
 
-                        if (valid.length > 0) {
-                            console.log(`   ✅ [${store.name}] Achou ${valid.length} itens reais para "${keyword}"`);
-                            allProducts.push(...valid);
-                            if (!store.id) break; // Se achou na geral, ótimo
-                        }
+                    if (valid.length > 0) {
+                        console.log(`      ✅ Sucesso! ${valid.length} itens encontrados para "${keyword}".`);
+                        allProducts.push(...valid);
+                        if (!store.id) break; // Se achou na geral, pula o resto pra economizar tempo
                     }
-                } catch (e) {}
-            }
+                }
+            } catch (e) {}
         }
+        
+        if (allProducts.length > 0) break; // Se achou com esse termo, para a cascata.
     }
 
+    // Deduplicação
     const uniqueMap = new Map();
     allProducts.forEach(p => uniqueMap.set(p.id, p));
     const uniqueProducts = Array.from(uniqueMap.values());
 
-    console.log(`📦 [Job] Total Válido Encontrado: ${uniqueProducts.length}`);
+    console.log(`📦 [Job] Total Final: ${uniqueProducts.length} produtos.`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
@@ -123,9 +126,8 @@ const filterStep = createStep({
 
     try {
         for (const p of candidates) {
-            if (finalSelection.length >= 5) break;
+            if (finalSelection.length >= 4) break; 
 
-            // Filtra se já postou nos últimos 3 dias
             const res = await client.query(
                 `SELECT 1 FROM posted_products WHERE product_id_unique = $1 AND posted_at > NOW() - INTERVAL '3 days'`,
                 [p.id]
@@ -135,11 +137,8 @@ const filterStep = createStep({
         }
     } finally { client.release(); }
 
-    if (finalSelection.length > 0) {
-        console.log(`✨ [Job] ${finalSelection.length} ofertas prontas para envio.`);
-    } else {
-        console.log("⏸️ [Job] Itens encontrados, mas já postados (Duplicatas).");
-    }
+    if (finalSelection.length > 0) console.log(`✨ [Job] ${finalSelection.length} ofertas prontas.`);
+    else console.log("⏸️ [Job] Duplicatas filtradas.");
 
     return { success: finalSelection.length > 0, newProducts: finalSelection };
   }
@@ -156,7 +155,7 @@ const copyStep = createStep({
 
     await Promise.all(enrichedProducts.map(async (p) => {
         const price = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(p.price);
-        const prompt = `Post Telegram Venda. Produto: ${p.name}. Loja: ${p.store}. Preço: ${price}. Link: ${p.link}. Emojis!`;
+        const prompt = `Post Telegram. Produto: ${p.name}. Preço: ${price}. Link: ${p.link}. Emojis!`;
         try {
             const res = await agent?.generateLegacy([{ role: "user", content: prompt }]);
             p.generatedMessage = res?.text || "";
@@ -195,8 +194,8 @@ const publishStep = createStep({
         let text = p.generatedMessage || `🔥 ${p.name}\n💰 ${priceFormatted}`;
         const body: any = { 
             chat_id: chat, parse_mode: "Markdown", 
-            text: `${text}\n\n👇 *LINK DA OFERTA:* ${p.link}`,
-            reply_markup: { inline_keyboard: [[{ text: "🛒 IR PARA A LOJA", url: p.link }]] }
+            text: `${text}\n\n👇 *LINK:* ${p.link}`,
+            reply_markup: { inline_keyboard: [[{ text: "🛒 VER NA LOJA", url: p.link }]] }
         };
         if (p.image) { body.photo = p.image; body.caption = body.text; delete body.text; }
 
