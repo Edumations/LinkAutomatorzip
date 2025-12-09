@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const lomadeeTool = createTool({
   id: "lomadee-fetch-products",
-  description: "Busca produtos com Diagnóstico de Rejeição e Filtro Estrito",
+  description: "Busca produtos com Score de Relevância e Varredura Profunda",
   inputSchema: z.object({
     keyword: z.string(),
     limit: z.number().optional().default(12),
@@ -25,16 +25,16 @@ export const lomadeeTool = createTool({
     const sourceId = process.env.LOMADEE_SOURCE_ID;
 
     if (!apiKey) {
-        console.error("❌ [Lomadee] ERRO: API KEY ausente.");
+        console.error("❌ [Lomadee] ERRO: API KEY não definida.");
         return { products: [] };
     }
 
+    // --- 1. LIMPEZA E UTILITÁRIOS ---
     const cleanPrice = (val: any): number => {
         if (typeof val === 'number') return val;
         if (!val) return 0;
         try {
-            let str = String(val).trim();
-            str = str.replace(/[^\d.,]/g, ""); 
+            let str = String(val).trim().replace(/[^\d.,]/g, ""); 
             if (str.includes(",") && str.includes(".")) str = str.replace(/\./g, "").replace(",", ".");
             else if (str.includes(",")) str = str.replace(",", ".");
             return parseFloat(str) || 0;
@@ -43,7 +43,8 @@ export const lomadeeTool = createTool({
 
     const normalize = (str: string) => str.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-    const findValueRecursively = (obj: any, keys: string[]): any => {
+    // --- 2. BUSCA PROFUNDA DE VALORES ---
+    const findValue = (obj: any, keys: string[]): any => {
         if (!obj || typeof obj !== 'object') return null;
         for (const key of keys) {
             if (obj[key]) {
@@ -55,61 +56,62 @@ export const lomadeeTool = createTool({
         }
         if (Array.isArray(obj)) {
             for (const item of obj) {
-                const found = findValueRecursively(item, keys);
+                const found = findValue(item, keys);
                 if (found) return found;
             }
             return null;
         }
         for (const k of Object.keys(obj)) {
-            if (['description', 'specifications'].includes(k)) continue;
-            const found = findValueRecursively(obj[k], keys);
+            if (['description', 'specifications'].includes(k)) continue; // Otimização
+            const found = findValue(obj[k], keys);
             if (found) return found;
         }
         return null;
     };
 
-    // --- SELETOR INTELIGENTE COM DIAGNÓSTICO ---
-    const findBestProductsArray = (obj: any, keyword: string): any[] => {
+    // --- 3. SELETOR INTELIGENTE (O "Detector de Mentiras") ---
+    // Analisa todos os arrays do JSON e escolhe o que tem mais a ver com a busca
+    const findBestArray = (obj: any, keyword: string): any[] => {
         let bestArray: any[] = [];
         let maxScore = 0;
-        const searchTerms = normalize(keyword).split(" ").filter(w => w.length > 2);
+        // Termos obrigatórios (ignora palavras curtas)
+        const terms = normalize(keyword).split(" ").filter(w => w.length > 2);
 
         const scan = (node: any) => {
             if (!node) return;
-            if (Array.isArray(node)) {
-                if (node.length > 0) {
-                    let currentScore = 0;
-                    const sample = node.slice(0, 5);
-                    
-                    for (const item of sample) {
-                        const name = findValueRecursively(item, ['name', 'productName', 'linkName']);
-                        if (name && typeof name === 'string') {
-                            const normName = normalize(name);
-                            // Pontuação simples: quantos termos da busca aparecem no nome?
-                            const matches = searchTerms.filter(term => normName.includes(term)).length;
-                            if (matches > 0) currentScore += matches;
-                            else {
-                                // LOG DE DIAGNÓSTICO (Opcional: Descomente para ver o lixo que a API manda)
-                                // console.log(`   ⚠️ [DEBUG] Rejeitado: "${name}" (Não tem "${keyword}")`);
-                            }
-                        }
+            if (Array.isArray(node) && node.length > 0) {
+                let score = 0;
+                const sample = node.slice(0, 5); // Amostra para performance
+                
+                for (const item of sample) {
+                    const name = findValue(item, ['name', 'productName', 'linkName']);
+                    if (name && typeof name === 'string') {
+                        const normName = normalize(name);
+                        // Pontua se o nome do produto contém termos da busca
+                        const matches = terms.filter(t => normName.includes(t)).length;
+                        score += matches;
                     }
+                }
 
-                    if (currentScore > maxScore) {
-                        maxScore = currentScore;
-                        bestArray = node;
-                    }
+                // Só aceita se tiver pontuação relevante (evita "Mais Vendidos" aleatórios)
+                if (score > maxScore) {
+                    maxScore = score;
+                    bestArray = node;
                 }
                 return;
             }
             if (typeof node === 'object') {
-                for (const key of Object.keys(node)) {
-                    scan(node[key]);
-                }
+                for (const key of Object.keys(node)) scan(node[key]);
             }
         };
 
         scan(obj);
+        
+        // Se o score for zero, significa que a lista não tem nada a ver com a busca.
+        if (maxScore === 0 && bestArray.length > 0) {
+            // console.log(`   ⚠️ [Lomadee] Lista ignorada por irrelevância (Score 0)`);
+            return [];
+        }
         return bestArray;
     };
 
@@ -117,12 +119,13 @@ export const lomadeeTool = createTool({
       const params = new URLSearchParams({
         keyword: context.keyword,
         size: String(context.limit || 12),
-        sort: context.sort || "relevance"
+        sort: "relevance"
       });
 
       if (sourceId) params.append("sourceId", sourceId);
-      if (context.storeId && context.storeId !== "undefined") params.append("storeId", context.storeId);
+      if (context.storeId) params.append("storeId", context.storeId);
 
+      // Tenta endpoints Beta e V3 automaticamente
       const endpoints = [
           `https://api-beta.lomadee.com.br/affiliate/products?${params.toString()}`,
           `https://api.lomadee.com/v3/${process.env.LOMADEE_APP_TOKEN || apiKey}/product/_search?${params.toString()}`
@@ -139,38 +142,27 @@ export const lomadeeTool = createTool({
 
       if (!rawData) return { products: [] };
 
-      // Seletor Inteligente
-      const rawProducts = findBestProductsArray(rawData, context.keyword);
+      // Aplica o Seletor Inteligente
+      const rawProducts = findBestArray(rawData, context.keyword);
 
-      if (rawProducts.length === 0) {
-          // console.log(`   🚫 Nenhuma lista relevante encontrada para "${context.keyword}"`);
-          return { products: [] };
-      }
+      if (rawProducts.length === 0) return { products: [] };
 
       const products = rawProducts.map((item: any) => {
-        const finalPrice = findValueRecursively(item, ['price', 'salePrice', 'priceMin', 'value', 'amount']) || 0;
-        const finalLink = findValueRecursively(item, ['link', 'url', 'redirectLink', 'deepLink']) || "";
+        // Varre o item em busca das propriedades, não importa onde estejam
+        const price = findValue(item, ['price', 'salePrice', 'priceMin', 'value', 'amount']) || 0;
+        const link = findValue(item, ['link', 'url', 'redirectLink', 'deepLink']) || "";
+        let image = findValue(item, ['thumbnail', 'image', 'picture', 'url']);
+        if (image && typeof image === 'object') image = image.url;
         
-        let finalImage = findValueRecursively(item, ['thumbnail', 'image', 'picture', 'url']); 
-        if (finalImage && typeof finalImage === 'object') finalImage = finalImage.url;
-        if (typeof finalImage !== 'string' || !finalImage.startsWith('http')) finalImage = "";
+        const name = findValue(item, ['name', 'productName', 'linkName']) || context.keyword;
+        const store = item.store?.name || item.storeName || "Oferta";
+        const id = `${item.id || item._id || Math.random().toString(36)}-${store.replace(/\s+/g, '')}`;
 
-        const finalName = findValueRecursively(item, ['name', 'productName', 'linkName']) || context.keyword;
-        const storeName = item.store?.name || item.storeName || item.seller?.name || "Oferta";
-        const uniqueId = `${item.id || item._id || Math.random().toString(36)}-${storeName.replace(/\s+/g, '')}`;
-
-        return {
-            id: uniqueId,
-            name: finalName,
-            price: finalPrice,
-            link: finalLink,
-            image: finalImage,
-            store: storeName
-        };
+        return { id, name, price, link, image: typeof image === 'string' ? image : "", store };
       });
 
-      const validProducts = products.filter((p: any) => p.price > 0 && p.link !== "");
-      return { products: validProducts };
+      // Filtro final: Preço > 0 e Link válido
+      return { products: products.filter(p => p.price > 0 && p.link) };
 
     } catch (e) { return { products: [] }; }
   }
