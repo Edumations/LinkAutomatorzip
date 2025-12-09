@@ -6,14 +6,14 @@ import { lomadeeTool } from "../tools/lomadeeTool";
 const { Pool } = pg;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
+// LISTA CURADA (Termos genéricos funcionam melhor que específicos)
 const KEYWORDS = [
-  "iPhone 15", "iPhone 13", "Samsung Galaxy S24", "Samsung Galaxy A55", "Xiaomi Redmi Note", 
-  "Notebook Dell", "Notebook Lenovo", "MacBook Air", "Monitor Gamer", 
-  "Teclado Redragon", "Mouse Logitech", "Headset HyperX", 
-  "PlayStation 5", "Xbox Series S", "Nintendo Switch",
-  "Smart TV 50", "Smart TV 43", "Alexa Echo Dot", "Kindle",
-  "Cadeira Gamer", "Airfryer Mondial", "Geladeira Frost Free", "Ventilador", "Máquina de Lavar",
-  "Tênis Nike", "Tênis Adidas", "Whey Protein", "Creatina"
+  "Smartphone", "iPhone", "Samsung Galaxy", "Motorola", 
+  "Notebook", "Monitor", "Teclado Gamer", "Mouse", "Headset", 
+  "Smart TV", "Alexa", "Kindle",
+  "PlayStation", "Xbox", "Nintendo Switch",
+  "Cadeira Gamer", "Airfryer", "Geladeira", "Ventilador", "Lavadora",
+  "Tênis Nike", "Tênis Adidas", "Whey Protein"
 ];
 
 const STORES_TO_TRY = [
@@ -35,6 +35,7 @@ async function setupDatabase() {
         product_name TEXT,
         posted_at TIMESTAMP DEFAULT NOW()
       );
+      CREATE INDEX IF NOT EXISTS idx_posted_at ON posted_products(posted_at);
     `);
     client.release();
   } catch (err) { console.error("❌ Erro DB Setup:", err); }
@@ -46,17 +47,7 @@ const ProductSchema = z.object({
 });
 type Product = z.infer<typeof ProductSchema>;
 
-// --- FUNÇÃO DE VALIDAÇÃO DE NOME ---
-const isProductRelevant = (productName: string, keyword: string): boolean => {
-    const normName = productName.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    const searchTerms = keyword.toLowerCase().split(" ").filter(w => w.length > 2);
-    
-    // Regra: Pelo menos UM dos termos principais deve estar no nome
-    // Ex: Busca "iPhone 15". Produto "Capa para iPhone". Passa (relevante, mas pode ser acessório).
-    // Ex: Busca "iPhone 15". Produto "Geladeira". Não passa.
-    return searchTerms.some(term => normName.includes(term));
-};
-
+// --- PASSO 1: BUSCA INSISTENTE ---
 const fetchStep = createStep({
   id: "fetch-lomadee",
   inputSchema: z.object({}),
@@ -65,18 +56,20 @@ const fetchStep = createStep({
     let attempts = 0;
     let allProducts: Product[] = [];
     
-    // Tenta até achar 3 produtos válidos ou rodar 2 ciclos
-    while (allProducts.length < 3 && attempts < 2) {
+    // Continua tentando até achar 3 produtos ou falhar 3 vezes (Total de 6-9 buscas)
+    while (allProducts.length < 3 && attempts < 3) {
         attempts++;
         const selectedKeywords: string[] = [];
+        // Seleciona 2 palavras aleatórias
         while (selectedKeywords.length < 2) {
             const k = KEYWORDS[Math.floor(Math.random() * KEYWORDS.length)];
             if (!selectedKeywords.includes(k)) selectedKeywords.push(k);
         }
 
-        console.log(`🚀 [Job] Busca (Tentativa ${attempts}): ${selectedKeywords.join(" | ")}`);
+        console.log(`🚀 [Job] Ciclo ${attempts}: Buscando "${selectedKeywords.join('" e "')}"...`);
 
         for (const keyword of selectedKeywords) {
+            // Tenta na busca Geral e em +1 loja
             const stores = [STORES_TO_TRY[0], STORES_TO_TRY[Math.floor(Math.random() * (STORES_TO_TRY.length - 1)) + 1]];
             
             for (const store of stores) {
@@ -89,19 +82,18 @@ const fetchStep = createStep({
                     });
                     
                     if (res?.products?.length) {
-                        // --- FILTRO DE TRAVA DE SEGURANÇA ---
+                        // Validação Extra: O nome DEVE conter parte da keyword
+                        const normKey = keyword.toLowerCase().split(" ")[0]; // Pega a primeira palavra (ex: "PlayStation" de "PlayStation 5")
+                        
                         const valid = res.products.filter((p: any) => {
-                            const isRelevant = isProductRelevant(p.name, keyword);
-                            const isValidPrice = p.price > 15;
-                            return isRelevant && isValidPrice;
+                            const normName = p.name.toLowerCase();
+                            return normName.includes(normKey) && p.price > 15;
                         });
 
                         if (valid.length > 0) {
+                            console.log(`   ✅ [${store.name}] Achou ${valid.length} itens reais para "${keyword}"`);
                             allProducts.push(...valid);
-                            // console.log(`   ✅ [${store.name}] ${valid.length} itens confirmados para "${keyword}"`);
-                        } else {
-                            // Se filtrou tudo, é porque a API retornou lixo.
-                            // console.log(`   🗑️ [${store.name}] Retornou ${res.products.length} itens irrelevantes para "${keyword}". Ignorados.`);
+                            if (!store.id) break; // Se achou na geral, ótimo
                         }
                     }
                 } catch (e) {}
@@ -113,7 +105,7 @@ const fetchStep = createStep({
     allProducts.forEach(p => uniqueMap.set(p.id, p));
     const uniqueProducts = Array.from(uniqueMap.values());
 
-    console.log(`✅ [Job] Total Candidatos Aprovados: ${uniqueProducts.length}`);
+    console.log(`📦 [Job] Total Válido Encontrado: ${uniqueProducts.length}`);
     return { success: uniqueProducts.length > 0, products: uniqueProducts };
   },
 });
@@ -131,9 +123,9 @@ const filterStep = createStep({
 
     try {
         for (const p of candidates) {
-            if (finalSelection.length >= 4) break; 
+            if (finalSelection.length >= 5) break;
 
-            // Repostagem permitida a cada 3 dias
+            // Filtra se já postou nos últimos 3 dias
             const res = await client.query(
                 `SELECT 1 FROM posted_products WHERE product_id_unique = $1 AND posted_at > NOW() - INTERVAL '3 days'`,
                 [p.id]
@@ -144,9 +136,9 @@ const filterStep = createStep({
     } finally { client.release(); }
 
     if (finalSelection.length > 0) {
-        console.log(`✨ [Job] ${finalSelection.length} ofertas inéditas para postar.`);
+        console.log(`✨ [Job] ${finalSelection.length} ofertas prontas para envio.`);
     } else {
-        console.log("⏸️ [Job] Produtos encontrados, mas já postados recentemente.");
+        console.log("⏸️ [Job] Itens encontrados, mas já postados (Duplicatas).");
     }
 
     return { success: finalSelection.length > 0, newProducts: finalSelection };
@@ -203,7 +195,7 @@ const publishStep = createStep({
         let text = p.generatedMessage || `🔥 ${p.name}\n💰 ${priceFormatted}`;
         const body: any = { 
             chat_id: chat, parse_mode: "Markdown", 
-            text: `${text}\n\n👇 *OFERTA:* ${p.link}`,
+            text: `${text}\n\n👇 *LINK DA OFERTA:* ${p.link}`,
             reply_markup: { inline_keyboard: [[{ text: "🛒 IR PARA A LOJA", url: p.link }]] }
         };
         if (p.image) { body.photo = p.image; body.caption = body.text; delete body.text; }
